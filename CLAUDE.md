@@ -11,3 +11,7 @@
 ## その他のメモ
 
 <!-- チャットで得られた、今後も参照すべき指示・注意点をここに追記していく -->
+
+- このプロジェクトはビルドツール(webpack/vite等)を使わないプレーンな JS/HTML/CSS の Chrome Extension(Manifest V3)。npm はライブラリ取得(`npm pack` で ESM バンドルを `vendor/` に配置する等)にのみ使い、依存パッケージとして `node_modules` に持ち込む使い方はしていない。この方針を変える場合はユーザーに確認すること。
+- 実装の背景・アーキテクチャ判断(なぜ offscreen document を使うか、GIF をどう作っているか等)は README.md にまとまっているので、拡張機能まわりを触る前に必ず目を通すこと。
+- **重要**: このセッションで使える組み込みブラウザ(Claude Browser / preview 系ツール)はサンドボックス化されており、`chrome://` 系ページや拡張機能の読み込み(`chrome://extensions` での Load unpacked)には使えない。Chrome Extension の動作確認は静的チェック(`node --check` での構文確認など)止まりになるため、実際の動作確認はユーザー自身に実機の Chrome で行ってもらう必要がある。「動作確認しました」と安易に言わないこと。
