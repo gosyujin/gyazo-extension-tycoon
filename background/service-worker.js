@@ -3,13 +3,27 @@
 // 一元的に呼び出すオーケストレーター。
 // - Blob/canvas/ダウンロード処理は行わない(offscreen document の責務)。
 // - DOM操作(オーバーレイ・スクロール)は行わない(content script の責務)。
+//
+// 注意: このファイル(サービスワーカー)は MV3 の仕様上、アイドル状態が続くと
+// 破棄され、次のイベントで再起動される。トップレベルの `let` 変数は再起動で
+// リセットされるため、「録画中かどうか」のような状態はここでは保持せず、
+// 常に offscreen document (再起動されない) 側の実態を問い合わせて判定する。
 
 const OFFSCREEN_URL = "offscreen/offscreen.html";
+const LOG_PREFIX = "[service-worker]";
 
-let recordingState = {
-  isRecording: false,
-  tabId: null,
-};
+function log(...args) {
+  console.log(LOG_PREFIX, ...args);
+}
+
+function notify(message, { isError = false } = {}) {
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icons/icon128.png",
+    title: isError ? "Gyazo Extension Tycoon - エラー" : "Gyazo Extension Tycoon",
+    message,
+  });
+}
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -23,23 +37,25 @@ function timestampedFilename(ext) {
   return `GyazoExtensionTycoon/capture-${ts}.${ext}`;
 }
 
-async function ensureOffscreenDocument() {
-  const existing = await chrome.runtime.getContexts?.({
-    contextTypes: ["OFFSCREEN_DOCUMENT"],
-  });
-  if (existing && existing.length > 0) return;
-
-  // getContexts is unavailable on older Chrome; hasDocument is the fallback.
-  if (!existing && chrome.offscreen.hasDocument) {
-    const has = await chrome.offscreen.hasDocument();
-    if (has) return;
+async function hasOffscreenDocument() {
+  if (chrome.runtime.getContexts) {
+    const existing = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+    });
+    return existing.length > 0;
   }
+  // getContexts はやや新しい API なので、無い場合は hasDocument にフォールバックする。
+  return chrome.offscreen.hasDocument();
+}
 
+async function ensureOffscreenDocument() {
+  if (await hasOffscreenDocument()) return;
+  log("creating offscreen document");
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_URL,
     reasons: ["USER_MEDIA", "BLOBS"],
     justification:
-      "タブ録画(MediaRecorder)、キャプチャ画像のトリミング/結合、GIFエンコード、ファイルダウンロードのため",
+      "タブ録画(MediaStream)、キャプチャ画像のトリミング/結合、GIFエンコード、ファイルダウンロードのため",
   });
 }
 
@@ -60,11 +76,25 @@ async function captureActiveTabPng(windowId) {
 
 async function sendToOffscreen(message) {
   await ensureOffscreenDocument();
-  return chrome.runtime.sendMessage({ target: "offscreen", ...message });
+  log("-> offscreen", message.type);
+  const result = await chrome.runtime.sendMessage({
+    target: "offscreen",
+    ...message,
+  });
+  log("<- offscreen", message.type, result);
+  return result;
+}
+
+// 録画中かどうかは offscreen document に実態を聞きに行く(background 側では持たない)。
+async function queryIsRecording() {
+  if (!(await hasOffscreenDocument())) return false;
+  const result = await sendToOffscreen({ type: "GET_RECORDING_STATE" });
+  return !!result?.isRecording;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target === "offscreen") return; // offscreen宛は無視
+  log("received", message.type, "from", sender.tab ? `tab#${sender.tab.id}` : "extension page");
 
   (async () => {
     switch (message.type) {
@@ -77,6 +107,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           filename: timestampedFilename("png"),
           saveAs: false,
         });
+        notify("表示中のページを保存しました");
         sendResponse({ ok: true });
         break;
       }
@@ -147,6 +178,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           dpr: message.dpr,
           filename: timestampedFilename("png"),
         });
+        if (result?.ok) notify("選択範囲を保存しました");
+        else notify(`保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
         sendResponse(result);
         break;
       }
@@ -160,11 +193,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           dpr: message.dpr,
           filename: timestampedFilename("png"),
         });
+        if (result?.ok) notify("ページ全体を保存しました");
+        else notify(`保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
         sendResponse(result);
         break;
       }
 
       case "SELECTION_CANCELLED": {
+        log("selection cancelled by user/content-script");
+        notify("選択がキャンセルされました(範囲が小さすぎるか Esc が押されました)");
         sendResponse({ ok: true });
         break;
       }
@@ -172,47 +209,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // --- 録画(GIF)関連 ---
       case "RECORDING_AUTO_STOPPED": {
         // offscreen 側の安全上限(GIF_MAX_FRAMES)到達による自動停止の通知
-        recordingState = { isRecording: false, tabId: null };
+        log("recording auto-stopped (max frames reached)", message.result);
+        if (message.result?.ok) notify("上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました");
+        else notify(`自動停止時の保存に失敗しました: ${message.result?.error ?? "不明なエラー"}`, { isError: true });
         sendResponse({ ok: true });
         break;
       }
 
       case "GET_RECORDING_STATE": {
-        sendResponse(recordingState);
+        const isRecording = await queryIsRecording();
+        sendResponse({ isRecording });
         break;
       }
 
       case "TOGGLE_RECORDING": {
-        if (recordingState.isRecording) {
+        const isRecording = await queryIsRecording();
+        if (isRecording) {
           const result = await sendToOffscreen({
             type: "STOP_RECORDING",
             filename: timestampedFilename("gif"),
           });
-          recordingState = { isRecording: false, tabId: null };
-          sendResponse({ recordingState, result });
+          if (result?.ok) notify(`GIFを保存しました(${result.frameCount}フレーム)`);
+          else notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+          sendResponse({ recordingState: { isRecording: false }, result });
         } else {
           const tab = await getActiveTab();
           const streamId = await chrome.tabCapture.getMediaStreamId({
             targetTabId: tab.id,
           });
-          await ensureOffscreenDocument();
+          log("got tabCapture streamId, starting offscreen recording");
           const result = await sendToOffscreen({
             type: "START_RECORDING",
             streamId,
           });
-          if (result && result.ok) {
-            recordingState = { isRecording: true, tabId: tab.id };
+          if (!result?.ok) {
+            notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
           }
-          sendResponse({ recordingState, result });
+          sendResponse({
+            recordingState: { isRecording: !!result?.ok },
+            result,
+          });
         }
         break;
       }
 
       default:
+        log("unhandled message type", message.type);
         break;
     }
   })().catch((err) => {
-    console.error("[service-worker] error handling", message?.type, err);
+    console.error(LOG_PREFIX, "error handling", message?.type, err);
+    notify(`エラーが発生しました(${message?.type}): ${err?.message || err}`, {
+      isError: true,
+    });
     sendResponse({ ok: false, error: String(err?.message || err) });
   });
 

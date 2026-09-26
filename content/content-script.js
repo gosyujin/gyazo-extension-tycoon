@@ -9,6 +9,11 @@
   }
   window.__gyazoExtTycoonInjected = true;
 
+  const LOG_PREFIX = "[content-script]";
+  function log(...args) {
+    console.log(LOG_PREFIX, ...args);
+  }
+
   const MAX_TILES = 80; // フルページ撮影の安全上限(暴走防止の暫定値。要調整)
   const SCROLL_SETTLE_MS = 300; // スクロール後、再描画/遅延読み込みを待つ暫定ディレイ
 
@@ -31,7 +36,8 @@
     }
   }
 
-  function notifyCancelled() {
+  function notifyCancelled(reason) {
+    log("cancelled:", reason);
     chrome.runtime.sendMessage({ type: "SELECTION_CANCELLED" });
   }
 
@@ -41,7 +47,7 @@
         e.preventDefault();
         e.stopPropagation();
         cleanupOverlay();
-        onCancel();
+        onCancel("Escape");
       }
     };
     window.addEventListener("keydown", keydownHandler, true);
@@ -49,6 +55,7 @@
 
   // --- 矩形選択 ---
   function startRectSelect() {
+    log("startRectSelect");
     cleanupOverlay();
     overlayEl = document.createElement("div");
     overlayEl.className = "gyazo-ext-tycoon-overlay";
@@ -76,14 +83,18 @@
       overlayEl.removeEventListener("mouseup", onMouseUp);
       cleanupOverlay();
       if (rect.width < 2 || rect.height < 2) {
-        notifyCancelled();
+        notifyCancelled(`rect too small (drag needed): ${JSON.stringify(rect)}`);
         return;
       }
-      chrome.runtime.sendMessage({
-        type: "CROP_SELECTION_READY",
-        rect,
-        dpr: window.devicePixelRatio || 1,
-      });
+      log("rect selected", rect);
+      chrome.runtime
+        .sendMessage({
+          type: "CROP_SELECTION_READY",
+          rect,
+          dpr: window.devicePixelRatio || 1,
+        })
+        .then((res) => log("CROP_SELECTION_READY response", res))
+        .catch((err) => console.error(LOG_PREFIX, "CROP_SELECTION_READY failed", err));
     };
 
     function updateSelectionBox(x, y) {
@@ -109,6 +120,7 @@
 
   // --- 要素選択 ---
   function startElementSelect() {
+    log("startElementSelect");
     cleanupOverlay();
     highlightEl = document.createElement("div");
     highlightEl.className = "gyazo-ext-tycoon-highlight";
@@ -135,9 +147,10 @@
       window.removeEventListener("click", onClick, true);
       cleanupOverlay();
       if (!target) {
-        notifyCancelled();
+        notifyCancelled("no element under click point");
         return;
       }
+      log("element clicked", target.tagName, target.className);
       await handleElementSelected(target);
     };
 
@@ -157,17 +170,22 @@
       rect.bottom <= viewportHeight &&
       rect.right <= viewportWidth;
 
+    log("handleElementSelected", { rect, viewportWidth, viewportHeight, fitsInViewport });
+
     if (fitsInViewport) {
-      chrome.runtime.sendMessage({
-        type: "CROP_SELECTION_READY",
-        rect: {
-          left: rect.left,
-          top: rect.top,
-          width: rect.width,
-          height: rect.height,
-        },
-        dpr,
-      });
+      chrome.runtime
+        .sendMessage({
+          type: "CROP_SELECTION_READY",
+          rect: {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+          },
+          dpr,
+        })
+        .then((res) => log("CROP_SELECTION_READY response", res))
+        .catch((err) => console.error(LOG_PREFIX, "CROP_SELECTION_READY failed", err));
       return;
     }
 
@@ -185,6 +203,7 @@
 
   // --- フルページ撮影 ---
   async function startFullpageCapture() {
+    log("startFullpageCapture");
     const doc = document.documentElement;
     const width = doc.clientWidth;
     const height = Math.max(
@@ -202,6 +221,7 @@
   // スクロールしながら captureVisibleTab を繰り返し、タイル一覧を
   // background(→offscreen)に送って結合・保存してもらう。
   async function runTileCapture({ pageLeft, pageTop, width, height }) {
+    log("runTileCapture start", { pageLeft, pageTop, width, height });
     const dpr = window.devicePixelRatio || 1;
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight;
@@ -225,6 +245,7 @@
         type: "CAPTURE_NOW",
       });
       tiles.push({ dataUrl, pageY: actualScrollY, pageX: window.scrollX });
+      log(`captured tile ${i + 1}`, { actualScrollY, dataUrlLength: dataUrl?.length });
 
       if (actualScrollY + viewportHeight >= endY) break;
       currentY = actualScrollY + viewportHeight;
@@ -233,16 +254,22 @@
     window.scrollTo(originalScrollX, originalScrollY);
 
     if (tiles.length === 0) {
-      notifyCancelled();
+      notifyCancelled("no tiles captured");
       return;
     }
 
-    await chrome.runtime.sendMessage({
-      type: "TILES_READY",
-      tiles,
-      region: { pageLeft, pageTop, width, height, viewportWidth, viewportHeight },
-      dpr,
-    });
+    log(`sending ${tiles.length} tiles to background`);
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "TILES_READY",
+        tiles,
+        region: { pageLeft, pageTop, width, height, viewportWidth, viewportHeight },
+        dpr,
+      });
+      log("TILES_READY response", res);
+    } catch (err) {
+      console.error(LOG_PREFIX, "TILES_READY failed", err);
+    }
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

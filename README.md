@@ -48,14 +48,28 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
 
 - `GIF_FRAME_INTERVAL_MS`(GIFのフレーム間隔、現在 150ms 固定)と `GIF_MAX_FRAMES`(最大フレーム数、現在 300 = 約45秒)は暴走防止のための暫定値。画質・ファイルサイズ・CPU負荷を見ながら今後調整する([offscreen/offscreen.js](offscreen/offscreen.js) 冒頭の定数)。
 - フルページ/大きい要素のタイル撮影は、スクロール後に固定ディレイ(`SCROLL_SETTLE_MS` = 300ms)を待つだけの素朴な実装。`position: fixed/sticky` 要素がタイルごとに重複して写り込む、遅延読み込み画像に対応できない、といった既知の制限がある。
-- アイコン画像は未設定(`manifest.json` に `icons` 未指定。ツールバーは既定のパズルピースアイコンになる)。
-- 拡張機能のロード・実際の操作確認は、このセッションで使えるプレビューブラウザ(サンドボックス化されており `chrome://extensions` や拡張機能の読み込みに対応していない)では検証できなかった。**実機の Chrome で下記手順により動作確認が必要。**
+- アイコンは仮の単色プレースホルダー(`icons/`、`vendor` 同様に本物のデザインは未着手)。
+- 拡張機能のロード・実際の操作確認は、このセッションで使えるプレビューブラウザ(サンドボックス化されており `chrome://extensions` や拡張機能の読み込みに対応していない)では検証できない。**実機の Chrome で動作確認する必要がある**(下記「セットアップ」「うまく動かないとき」参照)。
 
 ## セットアップ(開発用に読み込む)
 
 1. `chrome://extensions` を開く
 2. 右上の「デベロッパーモード」を有効化
 3. 「パッケージ化されていない拡張機能を読み込む」でこのリポジトリのルートフォルダを選択
+
+## うまく動かないとき(ログの見方)
+
+矩形選択・要素選択・フルページ・GIF録画は、保存の成功/失敗を **Chrome の通知(`chrome.notifications`)** で表示する(「表示中のページを保存」も含め、保存系アクションはすべて通知が出る想定)。まず通知の文言を確認する。
+
+より詳しいログは 3 箇所の DevTools コンソールに分かれて出力される。
+
+| 見たいログ | 開き方 |
+|---|---|
+| `background/service-worker.js` (`[service-worker]` ログ) | `chrome://extensions` → このカードの「Service Worker」リンク(青字)をクリック |
+| `offscreen/offscreen.js` (`[offscreen]` ログ) | `chrome://extensions` → 「詳細」→ 「ビューを検査」に出てくる `offscreen.html` を開く(録画/保存を一度も実行していないとまだ存在しない) |
+| `content/content-script.js` (`[content-script]` ログ) | 実際にキャプチャ操作をしたページ自体の DevTools(F12)→ Console |
+
+いずれも問題があれば `console.error` で赤字表示される。バグ報告してもらう際はここのログをコピーしてもらえると特定しやすい。
 
 ## 今後の拡張(未実装)
 
@@ -74,3 +88,12 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - アニメーション形式は GIF を採用(互換性重視)。実装方式は `captureVisibleTab` 連投ではなく `tabCapture` のライブストリームからのフレームサンプリングを選択(理由は上記「GIF 実装方針についての経緯」を参照)。
   - 解像度は `devicePixelRatio` を考慮する方針のため、`captureVisibleTab` が返す実ピクセル解像度の画像をそのまま使い、クロップ/結合時の座標計算にも dpr を掛けて対応した。
   - GIF エンコードには自前実装ではなく [gifenc](https://github.com/mattdesl/gifenc)(MIT)を採用。ビルド不要な単一 ESM ファイルとして配布されており、このプロジェクトのビルドツールなし方針に合致するため。
+
+### 2026-09-27
+- 実機での動作確認で「表示中のページを保存」だけ成功し、矩形選択・要素選択・GIF録画はファイルが生成されない(かつログも見えない)との報告を受け、以下を修正。
+  - **録画状態のバグ**: `background/service-worker.js` は MV3 サービスワーカーで、アイドルで破棄されると再起動時にトップレベルの `let` 変数がリセットされる。録画中フラグをサービスワーカー側の変数だけで持っていたため、録画中にサービスワーカーが再起動すると「録画中ではない」という誤った状態になり、以後ずっと開始/停止のトグルが噛み合わなくなるバグがあった。録画の実体を持つ offscreen document 側に `GET_RECORDING_STATE` を問い合わせて真の状態を都度確認する方式に変更した。
+  - **エラーが一切表面化しない問題**: 矩形選択・要素選択・フルページはユーザー操作(content script)からの一方通行の通知(`CROP_SELECTION_READY` 等)で、失敗しても background 内で `console.error` されるだけで誰も見ていなかった。`chrome.notifications` で成功/失敗を画面に通知するようにした。
+  - `offscreen/offscreen.js` の gifenc の import を静的 import から動的 import(`startRecording` 内でのみ読み込み)に変更。PNG系の機能が GIF 側の問題(あれば)に引きずられて全滅しないよう分離。
+  - background/content-script/offscreen の主要な処理ステップに `console.log` を追加(DevTools での追跡用。README「うまく動かないとき」参照)。
+  - クロップ/タイル結合で範囲が不正(幅・高さが0以下)な場合に無言で失敗せず、明示的にエラーを投げるようにした。
+  - 仮のツールバーアイコン(単色PNG)を追加。
