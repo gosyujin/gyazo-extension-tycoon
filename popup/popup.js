@@ -1,14 +1,17 @@
 const messageEl = document.getElementById("message");
-const recordBtn = document.getElementById("btn-record");
 const recordStatusEl = document.getElementById("record-status");
+const btnRecordRect = document.getElementById("btn-record-rect");
+const btnRecordElement = document.getElementById("btn-record-element");
+const btnRecordVisible = document.getElementById("btn-record-visible");
+const btnRecordStop = document.getElementById("btn-record-stop");
 
 function showMessage(text) {
   messageEl.textContent = text;
 }
 
-async function send(type) {
+async function send(type, extra = {}) {
   try {
-    const response = await chrome.runtime.sendMessage({ type });
+    const response = await chrome.runtime.sendMessage({ type, ...extra });
     if (response && response.ok === false) {
       showMessage(`エラー: ${response.error}`);
     }
@@ -39,28 +42,37 @@ document.getElementById("btn-fullpage").addEventListener("click", async () => {
 });
 
 function renderRecordingState(state) {
-  if (state?.isRecording) {
-    recordBtn.textContent = "録画停止してGIF保存";
-    recordBtn.classList.add("recording");
-    recordStatusEl.textContent = "録画中...";
-  } else {
-    recordBtn.textContent = "録画開始";
-    recordBtn.classList.remove("recording");
-    recordStatusEl.textContent = "";
-  }
+  const isRecording = !!state?.isRecording;
+  btnRecordRect.disabled = isRecording;
+  btnRecordElement.disabled = isRecording;
+  btnRecordVisible.disabled = isRecording;
+  btnRecordStop.disabled = !isRecording;
+  recordStatusEl.textContent = isRecording ? "録画中...(停止するとGIFが保存されます)" : "";
 }
 
-recordBtn.addEventListener("click", async () => {
-  recordBtn.disabled = true;
-  const response = await send("TOGGLE_RECORDING");
-  recordBtn.disabled = false;
-  if (response?.recordingState) {
-    renderRecordingState(response.recordingState);
-  }
-  if (response?.recordingState && !response.recordingState.isRecording) {
-    // 停止 = GIF保存完了。popupを閉じてよい。
-    window.close();
-  }
+// 矩形選択・要素選択は、ページ側のオーバーレイで選択が終わったタイミングで
+// 録画が始まる(選択中はこのpopupは閉じている必要があるため)。
+btnRecordRect.addEventListener("click", async () => {
+  await send("START_RECT_SELECT", { mode: "record" });
+  window.close();
+});
+
+btnRecordElement.addEventListener("click", async () => {
+  await send("START_ELEMENT_SELECT", { mode: "record" });
+  window.close();
+});
+
+btnRecordVisible.addEventListener("click", async () => {
+  btnRecordVisible.disabled = true;
+  const response = await send("START_RECORDING_VISIBLE");
+  if (response?.recordingState) renderRecordingState(response.recordingState);
+});
+
+btnRecordStop.addEventListener("click", async () => {
+  btnRecordStop.disabled = true;
+  const response = await send("STOP_RECORDING");
+  if (response?.recordingState) renderRecordingState(response.recordingState);
+  window.close();
 });
 
 (async () => {

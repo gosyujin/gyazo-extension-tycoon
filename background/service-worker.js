@@ -25,6 +25,13 @@ function notify(message, { isError = false } = {}) {
   });
 }
 
+// popup を閉じている間(矩形/要素選択からの録画開始など)も録画中であることが
+// わかるよう、ツールバーアイコンにバッジを出す。
+function setRecordingBadge(isRecording) {
+  chrome.action.setBadgeBackgroundColor({ color: "#eb5757" });
+  chrome.action.setBadgeText({ text: isRecording ? "REC" : "" });
+}
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -142,7 +149,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           target: { tabId: tab.id },
           files: ["content/overlay.css"],
         });
-        await chrome.tabs.sendMessage(tab.id, { type: "START_RECT_SELECT" });
+        await chrome.tabs.sendMessage(tab.id, {
+          type: "START_RECT_SELECT",
+          mode: message.mode,
+        });
         sendResponse({ ok: true });
         break;
       }
@@ -159,6 +169,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         await chrome.tabs.sendMessage(tab.id, {
           type: "START_ELEMENT_SELECT",
+          mode: message.mode,
         });
         sendResponse({ ok: true });
         break;
@@ -238,7 +249,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case "SELECTION_CANCELLED": {
         log("selection cancelled by user/content-script");
-        notify("選択がキャンセルされました(範囲が小さすぎるか Esc が押されました)");
+        notify(
+          message.message ?? "選択がキャンセルされました(範囲が小さすぎるか Esc が押されました)"
+        );
         sendResponse({ ok: true });
         break;
       }
@@ -247,6 +260,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "RECORDING_AUTO_STOPPED": {
         // offscreen 側の安全上限(GIF_MAX_FRAMES)到達による自動停止の通知
         log("recording auto-stopped (max frames reached)", message.result);
+        setRecordingBadge(false);
         if (message.result?.ok && message.result.url) {
           await downloadUrl(message.result.url, timestampedFilename("gif"));
           notify("上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました");
@@ -259,43 +273,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case "GET_RECORDING_STATE": {
         const isRecording = await queryIsRecording();
+        setRecordingBadge(isRecording);
         sendResponse({ isRecording });
         break;
       }
 
-      case "TOGGLE_RECORDING": {
-        const isRecording = await queryIsRecording();
-        if (isRecording) {
-          const filename = timestampedFilename("gif");
-          const result = await sendToOffscreen({
-            type: "STOP_RECORDING",
-            filename,
-          });
-          if (result?.ok && result.url) {
-            await downloadUrl(result.url, filename);
-            notify(`GIFを保存しました(${result.frameCount}フレーム)`);
-          } else {
-            notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
-          }
-          sendResponse({ recordingState: { isRecording: false }, result });
+      // 表示中のページ(タブ全体)をそのまま録画開始する。
+      case "START_RECORDING_VISIBLE": {
+        const tab = await getActiveTab();
+        const streamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: tab.id,
+        });
+        log("got tabCapture streamId, starting offscreen recording (visible page)");
+        const result = await sendToOffscreen({ type: "START_RECORDING", streamId });
+        if (result?.ok) {
+          setRecordingBadge(true);
         } else {
-          const tab = await getActiveTab();
-          const streamId = await chrome.tabCapture.getMediaStreamId({
-            targetTabId: tab.id,
-          });
-          log("got tabCapture streamId, starting offscreen recording");
-          const result = await sendToOffscreen({
-            type: "START_RECORDING",
-            streamId,
-          });
-          if (!result?.ok) {
-            notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
-          }
-          sendResponse({
-            recordingState: { isRecording: !!result?.ok },
-            result,
-          });
+          notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
         }
+        sendResponse({ recordingState: { isRecording: !!result?.ok }, result });
+        break;
+      }
+
+      // 矩形選択・要素選択(ビューポートに収まるもの)からの録画開始。
+      // content script 側で選択が完了すると送られてくる。
+      case "RECT_READY_FOR_RECORDING": {
+        const tab = sender.tab;
+        const streamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: tab.id,
+        });
+        log("got tabCapture streamId, starting offscreen recording (rect)", message.rect);
+        const result = await sendToOffscreen({
+          type: "START_RECORDING",
+          streamId,
+          rect: message.rect,
+          dpr: message.dpr,
+        });
+        if (result?.ok) {
+          setRecordingBadge(true);
+          notify("録画を開始しました(ツールバーのアイコンから停止できます)");
+        } else {
+          notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+        }
+        sendResponse(result);
+        break;
+      }
+
+      case "STOP_RECORDING": {
+        const filename = timestampedFilename("gif");
+        const result = await sendToOffscreen({ type: "STOP_RECORDING", filename });
+        setRecordingBadge(false);
+        if (result?.ok && result.url) {
+          await downloadUrl(result.url, filename);
+          notify(`GIFを保存しました(${result.frameCount}フレーム)`);
+        } else {
+          notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+        }
+        sendResponse({ recordingState: { isRecording: false }, result });
         break;
       }
 

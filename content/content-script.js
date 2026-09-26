@@ -36,9 +36,10 @@
     }
   }
 
-  function notifyCancelled(reason) {
+  // message: ユーザー向けの通知文言(省略時はbackground側の汎用文言を使う)。
+  function notifyCancelled(reason, message) {
     log("cancelled:", reason);
-    chrome.runtime.sendMessage({ type: "SELECTION_CANCELLED" });
+    chrome.runtime.sendMessage({ type: "SELECTION_CANCELLED", message });
   }
 
   function armEscapeToCancel(onCancel) {
@@ -54,8 +55,9 @@
   }
 
   // --- 矩形選択 ---
-  function startRectSelect() {
-    log("startRectSelect");
+  // mode: "capture"(既定, PNG保存) | "record"(GIF録画をこの範囲で開始する)
+  function startRectSelect(mode = "capture") {
+    log("startRectSelect", { mode });
     cleanupOverlay();
     overlayEl = document.createElement("div");
     overlayEl.className = "gyazo-ext-tycoon-overlay";
@@ -86,15 +88,15 @@
         notifyCancelled(`rect too small (drag needed): ${JSON.stringify(rect)}`);
         return;
       }
-      log("rect selected", rect);
+      log("rect selected", rect, { mode });
+      const message =
+        mode === "record"
+          ? { type: "RECT_READY_FOR_RECORDING", rect, dpr: window.devicePixelRatio || 1 }
+          : { type: "CROP_SELECTION_READY", rect, dpr: window.devicePixelRatio || 1 };
       chrome.runtime
-        .sendMessage({
-          type: "CROP_SELECTION_READY",
-          rect,
-          dpr: window.devicePixelRatio || 1,
-        })
-        .then((res) => log("CROP_SELECTION_READY response", res))
-        .catch((err) => console.error(LOG_PREFIX, "CROP_SELECTION_READY failed", err));
+        .sendMessage(message)
+        .then((res) => log(message.type, "response", res))
+        .catch((err) => console.error(LOG_PREFIX, message.type, "failed", err));
     };
 
     function updateSelectionBox(x, y) {
@@ -119,8 +121,9 @@
   }
 
   // --- 要素選択 ---
-  function startElementSelect() {
-    log("startElementSelect");
+  // mode: "capture"(既定, PNG保存) | "record"(GIF録画をこの要素の範囲で開始する)
+  function startElementSelect(mode = "capture") {
+    log("startElementSelect", { mode });
     cleanupOverlay();
     highlightEl = document.createElement("div");
     highlightEl.className = "gyazo-ext-tycoon-highlight";
@@ -151,14 +154,14 @@
         return;
       }
       log("element clicked", target.tagName, target.className);
-      await handleElementSelected(target);
+      await handleElementSelected(target, mode);
     };
 
     window.addEventListener("mousemove", onMouseMove, true);
     window.addEventListener("click", onClick, true);
   }
 
-  async function handleElementSelected(target) {
+  async function handleElementSelected(target, mode = "capture") {
     const dpr = window.devicePixelRatio || 1;
     const rect = target.getBoundingClientRect();
     const viewportWidth = document.documentElement.clientWidth;
@@ -170,22 +173,34 @@
       rect.bottom <= viewportHeight &&
       rect.right <= viewportWidth;
 
-    log("handleElementSelected", { rect, viewportWidth, viewportHeight, fitsInViewport });
+    log("handleElementSelected", { rect, viewportWidth, viewportHeight, fitsInViewport, mode });
 
     if (fitsInViewport) {
+      const rectPayload = {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+      const message =
+        mode === "record"
+          ? { type: "RECT_READY_FOR_RECORDING", rect: rectPayload, dpr }
+          : { type: "CROP_SELECTION_READY", rect: rectPayload, dpr };
       chrome.runtime
-        .sendMessage({
-          type: "CROP_SELECTION_READY",
-          rect: {
-            left: rect.left,
-            top: rect.top,
-            width: rect.width,
-            height: rect.height,
-          },
-          dpr,
-        })
-        .then((res) => log("CROP_SELECTION_READY response", res))
-        .catch((err) => console.error(LOG_PREFIX, "CROP_SELECTION_READY failed", err));
+        .sendMessage(message)
+        .then((res) => log(message.type, "response", res))
+        .catch((err) => console.error(LOG_PREFIX, message.type, "failed", err));
+      return;
+    }
+
+    if (mode === "record") {
+      // GIF録画はライブ映像を毎フレーム切り出す都合上、フルページ撮影のような
+      // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
+      // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ対応する。
+      notifyCancelled(
+        `element does not fit in viewport, GIF recording only supports elements within it: ${JSON.stringify(rect)}`,
+        "選択した要素が画面からはみ出しているため録画できません(GIF録画は画面内に収まる要素のみ対応しています)"
+      );
       return;
     }
 
@@ -289,11 +304,11 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     switch (message.type) {
       case "START_RECT_SELECT":
-        startRectSelect();
+        startRectSelect(message.mode);
         sendResponse({ ok: true });
         break;
       case "START_ELEMENT_SELECT":
-        startElementSelect();
+        startElementSelect(message.mode);
         sendResponse({ ok: true });
         break;
       case "START_FULLPAGE_CAPTURE":

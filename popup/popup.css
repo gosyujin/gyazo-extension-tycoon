@@ -38,10 +38,15 @@ button:hover {
   background: #f0f0f0;
 }
 
-#btn-record.recording {
+#btn-record-stop {
   background: #eb5757;
   border-color: #d64545;
   color: #fff;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .hint {
