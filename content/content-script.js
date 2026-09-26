@@ -217,6 +217,18 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // captureVisibleTab はレート制限(実質2回/秒程度)にかかることがある。
+  // background 側でも間隔調整しているが、念のためここでもリトライする。
+  async function captureNowWithRetry(maxRetries = 4) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const res = await chrome.runtime.sendMessage({ type: "CAPTURE_NOW" });
+      if (res?.dataUrl) return res.dataUrl;
+      log("CAPTURE_NOW failed, will retry", { attempt, error: res?.error });
+      await waitFor(400 + attempt * 200);
+    }
+    return null;
+  }
+
   // pageLeft/pageTop/width/height はページ絶対座標(CSS px)。
   // スクロールしながら captureVisibleTab を繰り返し、タイル一覧を
   // background(→offscreen)に送って結合・保存してもらう。
@@ -241,10 +253,12 @@
       if (actualScrollY === lastScrollY) break; // これ以上スクロールできない(下端に到達)
       lastScrollY = actualScrollY;
 
-      const { dataUrl } = await chrome.runtime.sendMessage({
-        type: "CAPTURE_NOW",
-      });
-      tiles.push({ dataUrl, pageY: actualScrollY, pageX: window.scrollX });
+      const dataUrl = await captureNowWithRetry();
+      if (!dataUrl) {
+        log(`tile ${i + 1} capture failed after retries, skipping`, { actualScrollY });
+      } else {
+        tiles.push({ dataUrl, pageY: actualScrollY, pageX: window.scrollX });
+      }
       log(`captured tile ${i + 1}`, { actualScrollY, dataUrlLength: dataUrl?.length });
 
       if (actualScrollY + viewportHeight >= endY) break;

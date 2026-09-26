@@ -21,21 +21,21 @@ const GIF_PALETTE_SIZE = 256;
 
 let recording = null; // { stream, video, canvas, ctx, gif, intervalId, frameCount, width, height }
 
-function downloadBlob(blob, filename) {
-  log("downloading", filename, `${blob.size} bytes`, blob.type);
+// 重要: offscreen document には chrome.downloads が生えていない(呼ぶと
+// "Cannot read properties of undefined (reading 'download')" になる)。
+// そのため download 自体は background 側で行い、ここでは Blob を
+// Blob URL 化して返すだけにする。Blob URL は同一オリジン(この拡張機能)
+// であれば background からも参照できるが、この offscreen document が
+// 閉じられると無効になるため、background が chrome.downloads.download を
+// 呼び終えるまでは revoke しない(念のための保険として一定時間後に revoke する)。
+function blobToObjectUrl(blob, label) {
+  log("blobToObjectUrl", label, `${blob.size} bytes`, blob.type);
   if (blob.size === 0) {
-    throw new Error(`生成されたファイルが空です(${filename})`);
+    throw new Error(`生成されたファイルが空です(${label})`);
   }
   const url = URL.createObjectURL(blob);
-  return chrome.downloads
-    .download({ url, filename, saveAs: false })
-    .then((downloadId) => {
-      log("download started", filename, "downloadId=", downloadId);
-      return downloadId;
-    })
-    .finally(() => {
-      setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    });
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  return url;
 }
 
 async function loadBitmap(dataUrl) {
@@ -67,8 +67,8 @@ async function processCrop({ dataUrl, rect, dpr, filename }) {
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
 
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-  await downloadBlob(blob, filename);
-  return { ok: true };
+  const url = blobToObjectUrl(blob, filename);
+  return { ok: true, url };
 }
 
 // --- PNG: フルページ/大きい要素のタイル結合 ---
@@ -85,6 +85,12 @@ async function processTiles({ tiles, region, dpr, filename }) {
 
   let drawnTiles = 0;
   for (const tile of tiles) {
+    if (!tile.dataUrl) {
+      log("skipping tile with missing dataUrl (capture likely failed/rate-limited)", {
+        pageY: tile.pageY,
+      });
+      continue;
+    }
     const bitmap = await loadBitmap(tile.dataUrl);
     const sx = Math.max(0, Math.round((pageLeft - tile.pageX) * dpr));
     const sw = Math.min(Math.round(width * dpr), bitmap.width - sx);
@@ -103,8 +109,8 @@ async function processTiles({ tiles, region, dpr, filename }) {
   }
 
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-  await downloadBlob(blob, filename);
-  return { ok: true };
+  const url = blobToObjectUrl(blob, filename);
+  return { ok: true, url };
 }
 
 // --- GIF: tabCapture のライブストリームからフレームをサンプリングしてエンコード ---
@@ -171,7 +177,17 @@ async function startRecording({ streamId }) {
     if (recording && recording.frameCount >= GIF_MAX_FRAMES) {
       log("max frames reached, auto-stopping");
       finishRecording().then((result) => {
-        chrome.runtime.sendMessage({ type: "RECORDING_AUTO_STOPPED", result });
+        // Blob は chrome.runtime.sendMessage で JSON シリアライズできないため
+        // 必ず URL 文字列に変換してから送る。
+        if (result.ok) {
+          const url = blobToObjectUrl(result.blob, "auto-stopped-recording.gif");
+          chrome.runtime.sendMessage({
+            type: "RECORDING_AUTO_STOPPED",
+            result: { ok: true, url, frameCount: result.frameCount },
+          });
+        } else {
+          chrome.runtime.sendMessage({ type: "RECORDING_AUTO_STOPPED", result });
+        }
       });
     }
   }, GIF_FRAME_INTERVAL_MS);
@@ -218,8 +234,8 @@ async function finishRecording() {
 async function stopRecording({ filename }) {
   const result = await finishRecording();
   if (!result.ok) return result;
-  await downloadBlob(result.blob, filename);
-  return { ok: true, frameCount: result.frameCount };
+  const url = blobToObjectUrl(result.blob, filename);
+  return { ok: true, url, frameCount: result.frameCount };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

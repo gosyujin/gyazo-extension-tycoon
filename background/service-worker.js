@@ -68,10 +68,34 @@ async function getActiveTab() {
   return tab;
 }
 
+// chrome.tabs.captureVisibleTab には呼び出しレート制限があり(実質2回/秒程度)、
+// それを超えると失敗して undefined が返る(例外にはならない)。フルページ撮影のように
+// 連続で呼ぶ場合に備え、直近の呼び出しから最低間隔をあけるようにする。
+const MIN_CAPTURE_INTERVAL_MS = 550;
+let lastCaptureAt = 0;
+
 async function captureActiveTabPng(windowId) {
+  const wait = MIN_CAPTURE_INTERVAL_MS - (Date.now() - lastCaptureAt);
+  if (wait > 0) {
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+  lastCaptureAt = Date.now();
   // captureVisibleTab はそのタブの実ピクセル解像度(devicePixelRatio込み)で
   // PNG の data URL を返す。
-  return chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+  const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+  if (!dataUrl) {
+    throw new Error(
+      "captureVisibleTab が失敗しました(呼び出しレート制限の可能性があります)"
+    );
+  }
+  return dataUrl;
+}
+
+async function downloadUrl(url, filename) {
+  log("downloading", filename);
+  const downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
+  log("download started", filename, "downloadId=", downloadId);
+  return downloadId;
 }
 
 async function sendToOffscreen(message) {
@@ -102,11 +126,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "CAPTURE_VISIBLE_PAGE": {
         const tab = await getActiveTab();
         const dataUrl = await captureActiveTabPng(tab.windowId);
-        await chrome.downloads.download({
-          url: dataUrl,
-          filename: timestampedFilename("png"),
-          saveAs: false,
-        });
+        await downloadUrl(dataUrl, timestampedFilename("png"));
         notify("表示中のページを保存しました");
         sendResponse({ ok: true });
         break;
@@ -161,9 +181,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "CAPTURE_NOW": {
         // フルページ/要素タイル撮影のループ中、content script が1タイルぶん
         // 撮影してほしいときに呼ぶ。呼び出し元のタブを対象にする。
+        // レート制限等で失敗しても例外にせず、content script 側でリトライ
+        // 判断できるよう { dataUrl: null, error } を返す。
         const tab = sender.tab;
-        const dataUrl = await captureActiveTabPng(tab.windowId);
-        sendResponse({ dataUrl });
+        try {
+          const dataUrl = await captureActiveTabPng(tab.windowId);
+          sendResponse({ dataUrl });
+        } catch (err) {
+          log("CAPTURE_NOW failed", err.message);
+          sendResponse({ dataUrl: null, error: err.message });
+        }
         break;
       }
 
@@ -171,30 +198,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 矩形選択 or ビューポート内に収まる要素選択: 単発キャプチャ+クロップ
         const tab = sender.tab;
         const dataUrl = await captureActiveTabPng(tab.windowId);
+        const filename = timestampedFilename("png");
         const result = await sendToOffscreen({
           type: "PROCESS_CROP",
           dataUrl,
           rect: message.rect,
           dpr: message.dpr,
-          filename: timestampedFilename("png"),
+          filename,
         });
-        if (result?.ok) notify("選択範囲を保存しました");
-        else notify(`保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+        if (result?.ok && result.url) {
+          await downloadUrl(result.url, filename);
+          notify("選択範囲を保存しました");
+        } else {
+          notify(`保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+        }
         sendResponse(result);
         break;
       }
 
       case "TILES_READY": {
         // フルページ or ビューポートより大きい要素選択: タイル結合
+        const filename = timestampedFilename("png");
         const result = await sendToOffscreen({
           type: "PROCESS_TILES",
           tiles: message.tiles,
           region: message.region,
           dpr: message.dpr,
-          filename: timestampedFilename("png"),
+          filename,
         });
-        if (result?.ok) notify("ページ全体を保存しました");
-        else notify(`保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+        if (result?.ok && result.url) {
+          await downloadUrl(result.url, filename);
+          notify("ページ全体を保存しました");
+        } else {
+          notify(`保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+        }
         sendResponse(result);
         break;
       }
@@ -210,8 +247,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "RECORDING_AUTO_STOPPED": {
         // offscreen 側の安全上限(GIF_MAX_FRAMES)到達による自動停止の通知
         log("recording auto-stopped (max frames reached)", message.result);
-        if (message.result?.ok) notify("上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました");
-        else notify(`自動停止時の保存に失敗しました: ${message.result?.error ?? "不明なエラー"}`, { isError: true });
+        if (message.result?.ok && message.result.url) {
+          await downloadUrl(message.result.url, timestampedFilename("gif"));
+          notify("上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました");
+        } else {
+          notify(`自動停止時の保存に失敗しました: ${message.result?.error ?? "不明なエラー"}`, { isError: true });
+        }
         sendResponse({ ok: true });
         break;
       }
@@ -225,12 +266,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "TOGGLE_RECORDING": {
         const isRecording = await queryIsRecording();
         if (isRecording) {
+          const filename = timestampedFilename("gif");
           const result = await sendToOffscreen({
             type: "STOP_RECORDING",
-            filename: timestampedFilename("gif"),
+            filename,
           });
-          if (result?.ok) notify(`GIFを保存しました(${result.frameCount}フレーム)`);
-          else notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+          if (result?.ok && result.url) {
+            await downloadUrl(result.url, filename);
+            notify(`GIFを保存しました(${result.frameCount}フレーム)`);
+          } else {
+            notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+          }
           sendResponse({ recordingState: { isRecording: false }, result });
         } else {
           const tab = await getActiveTab();
