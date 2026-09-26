@@ -73,7 +73,7 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
 
 ## 今後の拡張(未実装)
 
-- 保存先を Gyazo / Imgur アップロードに切り替えられるようにする(現状は [offscreen/offscreen.js](offscreen/offscreen.js) の `downloadBlob()` がローカルダウンロードの唯一の保存先実装。保存先を複数用意する段階になったら、ここを差し替え可能な形に切り出す。抽象化を先取りして作り込むと使われない設計になりがちなので、今は意図的に作っていない)。
+- 保存先を Gyazo / Imgur アップロードに切り替えられるようにする(現状は [background/service-worker.js](background/service-worker.js) の `downloadUrl()` がローカルダウンロードの唯一の保存先実装。保存先を複数用意する段階になったら、ここを差し替え可能な形に切り出す。抽象化を先取りして作り込むと使われない設計になりがちなので、今は意図的に作っていない)。
 - GIF のフレームレート/最大時間/解像度を設定可能にする(popup からの設定 UI など)。
 - ツールバーアイコンの用意。
 
@@ -103,3 +103,4 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - **バグ1: `chrome.downloads` が offscreen document では `undefined`。** 矩形選択/要素選択で `{ok:false, error:"Cannot read properties of undefined (reading 'download')"}` というエラーが返っていた。原因は [offscreen/offscreen.js](offscreen/offscreen.js) 内で直接 `chrome.downloads.download()` を呼んでいたこと。offscreen document には(意図的な制限か既知の挙動か)`chrome.downloads` が生えていない。**対応**: ダウンロードの実行自体は background 側に戻し、offscreen 側は `Blob` を `URL.createObjectURL()` で Blob URL 化して返すだけにした(`blobToObjectUrl()`)。Blob URL は同一オリジン(拡張機能)であれば offscreen document が生きている間は background からも参照できるため、この分担で成立する。GIF の自動停止時に生の `Blob` を `chrome.runtime.sendMessage` で送ろうとしていた箇所(JSONシリアライズできず壊れる)も同時に修正。
   - **バグ2: `chrome.tabs.captureVisibleTab` のレート制限に引っかかっていた。** フルページ撮影のログで `dataUrlLength: undefined` になるタイルが定期的に出ており(実測: 40タイル中14タイルが失敗)、後続の結合処理がその `undefined` を `fetch()` しようとして `Failed to fetch` になっていた。同 API は実質 2 回/秒程度までしか呼べない制限があり、当時のループ間隔(300ms待機)では超えていた。**対応**: [background/service-worker.js](background/service-worker.js) に `captureActiveTabPng()` の呼び出し間隔を最低 550ms 空けるレートリミッターを追加し、失敗時(戻り値が空)は例外にして呼び出し元に伝わるようにした。[content/content-script.js](content/content-script.js) 側でも `CAPTURE_NOW` が失敗した場合に最大4回までバックオフ再試行する `captureNowWithRetry()` を追加(background 側の対策だけでは環境によっては足りない可能性があるため二重の防御)。
   - この2つは矩形選択・要素選択・フルページ・GIF録画のすべてに共通する原因だったため、まとめて直った可能性が高い。**未検証(実機での再確認が必要)。**
+- ユーザーから「修正するごとにバージョンバンプしてほしい」との要望があり、以降のルールとして [CLAUDE.md](CLAUDE.md) に明記。あわせて `manifest.json` の `version` を `0.1.0` → `0.1.1` に更新(直近のバグ修正2件分)。
