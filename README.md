@@ -203,3 +203,4 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - この変更により、GIFのファイルサイズは(フレーム数が増える分)これまでより大きくなる想定だが、ユーザーからの要望通り「容量は度外視でなめらかさ優先」の方針に合致する。
   - manifest を 0.5.0 に更新(処理方式そのものを変える、まとまった変更のため minor バンプ)。
   - **未検証**: このセッションも構文チェック(`node --check` 相当。`import.meta` を含むESMのため `vm.SourceTextModule` でのパース確認)のみで、実機での確認はできていない。特に、(1) 実際にガクガク感が改善したか、(2) Worker生成(`new Worker(new URL(...), { type: "module" })`)がChrome拡張機能のoffscreen document内で問題なく動作するか(offscreen.htmlの`<script type="module">`から呼ばれる前提だが、拡張機能のパッケージ化された `extension://` オリジンからのmodule worker生成は未検証)、(3) `MAX_PENDING_FRAMES` のガードが長時間録画時に発動して録画が破綻しないか、は実機での確認が必要。
+  - → 0.5.0 を実機で試してもらい、**「だいぶなめらかになった」ことを確認できた**。GIFエンコード(quantize/applyPalette/writeFrame)をフレームサンプリングと別スレッド(Worker)に分離したことが、ガクガク感の主因(重いエンコード処理がサンプリング用の`setInterval`自体を止めていたこと)への対処として有効だったと考えられる。Worker生成(`new Worker(new URL(...), { type: "module" })`)がoffscreen document内で問題なく動作することもこれで確認できた。
