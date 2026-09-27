@@ -67,7 +67,10 @@
   // --- 選択確定後の操作ツールバー(矩形選択・要素選択で共通) ---
   // canRecord=false の場合は録画ボタンを disabled にし、recordDisabledReason を
   // title(ツールチップ)に表示する。
-  function showActionToolbar(anchorRect, { onSave, canRecord, onStartRecording, recordDisabledReason }) {
+  // outlineEl: 選択範囲を示す枠(selectionBoxEl/highlightEl)。録画中はこの枠自体が
+  // 録画映像に写り込んでしまう(枠はちょうど選択範囲の境界に重なっており、録画対象の
+  // 領域の内側にはみ出て描画されるため)ので、録画中は非表示にする。
+  function showActionToolbar(anchorRect, { onSave, canRecord, onStartRecording, recordDisabledReason, outlineEl }) {
     toolbarEl?.remove();
     toolbarEl = document.createElement("div");
     toolbarEl.className = "gyazo-ext-tycoon-toolbar";
@@ -110,11 +113,15 @@
           const state = await chrome.runtime.sendMessage({ type: "GET_RECORDING_STATE" });
           if (state?.isRecording) {
             await chrome.runtime.sendMessage({ type: "STOP_RECORDING" });
+            if (outlineEl) outlineEl.style.visibility = "";
           } else {
-            await onStartRecording();
+            if (outlineEl) outlineEl.style.visibility = "hidden";
+            const result = await onStartRecording();
+            if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
           }
         } catch (err) {
           console.error(LOG_PREFIX, "toggle recording failed", err);
+          if (outlineEl) outlineEl.style.visibility = "";
         } finally {
           await refreshRecordLabel();
           recordBtn.disabled = false;
@@ -202,7 +209,13 @@
     overlayEl = null;
     selectionBoxEl.classList.add("gyazo-ext-tycoon-selection-box-locked");
 
-    const viewportWidth = document.documentElement.clientWidth;
+    // 録画側のクロップは tabCapture 映像の実解像度をこのビューポートCSS pxサイズで
+    // 割った比率で行う(offscreen.jsのstartRecording参照)。映像は実際に描画される
+    // 領域(スクロールバー分を含む window.innerWidth/innerHeight)を基準にしているため、
+    // ここも document.documentElement.clientWidth(スクロールバー分を除いた幅)ではなく
+    // window.innerWidth を使う必要がある。片方だけ違う基準を使うと、縦横比が
+    // 合わずクロップ範囲が横方向にだけずれる/広がるバグになる。
+    const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
 
     showActionToolbar(rect, {
@@ -222,6 +235,7 @@
           viewportWidth,
           viewportHeight,
         }),
+      outlineEl: selectionBoxEl,
     });
   }
 
@@ -294,6 +308,10 @@
     highlightEl.style.height = `${rect.height}px`;
 
     const rectPayload = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    // 録画のクロップ比率計算用は window.innerWidth を使う(理由はlockRectSelection参照)。
+    // fitsInViewport の判定自体は要素が実際に描画され得る範囲(clientWidth)との
+    // 比較のままでよいので、そちらの viewportWidth はそのまま残す。
+    const captureViewportWidth = window.innerWidth;
 
     showActionToolbar(rect, {
       onSave: async () => {
@@ -319,9 +337,10 @@
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect: rectPayload,
-          viewportWidth,
+          viewportWidth: captureViewportWidth,
           viewportHeight,
         }),
+      outlineEl: highlightEl,
     });
   }
 
