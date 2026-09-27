@@ -248,23 +248,55 @@
   }
 
   // --- 要素選択 ---
-  // 要素の getBoundingClientRect() は、その要素自身に見た目の区切り(背景色/背景画像/
-  // 枠線)が無い場合、実際に目に見えている内容(テキストや画像)より広いことがある
-  // (例: リストの1行が親コンテナいっぱいの幅を持つブロック要素で、中の文字はその
-  // 一部しか占めていない場合、右側の余白ごと選択・録画されてしまう)。
-  // 「選択した領域=見た目で認識できる範囲」にするため、要素自体に見た目の区切りが
-  // なければ、中の可視コンテンツ(テキスト/画像等)の外接矩形まで狭める。
-  // 要素自体に背景色/枠線等の区切りがある場合は、その区切り自体が「見た目の範囲」
-  // なので狭めない(例: カード状のUIは枠線込みでそのまま扱う)。
-  function hasVisibleBoxDecoration(el) {
+  // 要素の getBoundingClientRect() は、その要素自身に見た目の区切りが無い場合、
+  // 実際に目に見えている内容(テキストや画像)より横に広いことがある(例: リストの
+  // 1行が親コンテナいっぱいの幅を持つブロック要素で、中の文字はその一部しか
+  // 占めていない場合、右側の余白ごと選択・録画されてしまう)。狭めるのは横幅のみに
+  // 留める(報告された不具合はいずれも横方向のみだったため。縦方向まで狭めると
+  // リストの行区切り線などとズレるリスクがあり、狙いに対してやり過ぎになる)。
+  //
+  // 「見た目の区切り」の判定は2段階の注意が必要だった(実機検証で判明):
+  // - 単に backgroundColor が transparent でないだけでは不十分。多くのサイトは
+  //   リストの各行に(周囲と同じ)明示的な背景色を指定しているだけのことが多く、
+  //   その場合は周囲と区別がつかないため「視覚的な区切り」とは言えない。祖先を
+  //   遡って実際に透けて見える背景色(実効背景色)と比較し、異なる場合のみ
+  //   「区切りあり」とする。
+  // - 上下の枠線(リストの行区切り線)は横幅には無関係なので見ない。横方向の区切り
+  //   として数えるのは左右の枠線(と、周囲と異なる背景)のみ。
+  function isTransparentColor(color) {
+    return !color || color === "transparent" || color === "rgba(0, 0, 0, 0)";
+  }
+
+  function getEffectiveBackgroundColor(el) {
+    let node = el;
+    while (node) {
+      const bg = getComputedStyle(node).backgroundColor;
+      if (!isTransparentColor(bg)) return bg;
+      node = node.parentElement;
+    }
+    return "rgb(255, 255, 255)"; // フォールバック: 一般的なページ背景(白)と仮定
+  }
+
+  function hasDistinctBackground(el) {
     const cs = getComputedStyle(el);
-    const isTransparent = (color) => !color || color === "transparent" || color === "rgba(0, 0, 0, 0)";
-    if (!isTransparent(cs.backgroundColor)) return true;
     if (cs.backgroundImage && cs.backgroundImage !== "none") return true;
-    return ["Top", "Right", "Bottom", "Left"].some((side) => {
+    if (isTransparentColor(cs.backgroundColor)) return false;
+    if (!el.parentElement) return true;
+    return cs.backgroundColor !== getEffectiveBackgroundColor(el.parentElement);
+  }
+
+  function hasVisibleBorder(el, sides) {
+    const cs = getComputedStyle(el);
+    return sides.some((side) => {
       const width = parseFloat(cs[`border${side}Width`]);
-      return width > 0 && cs[`border${side}Style`] !== "none" && !isTransparent(cs[`border${side}Color`]);
+      return width > 0 && cs[`border${side}Style`] !== "none" && !isTransparentColor(cs[`border${side}Color`]);
     });
+  }
+
+  // 要素自体が「横方向に」見た目の区切りを持つか。持つ場合はその要素の左右端を
+  // そのまま「見た目の範囲」として扱う(狭めない)。
+  function hasHorizontalBoxDecoration(el) {
+    return hasDistinctBackground(el) || hasVisibleBorder(el, ["Left", "Right"]);
   }
 
   const REPLACED_TAGS = new Set(["IMG", "SVG", "CANVAS", "VIDEO", "IFRAME", "PICTURE"]);
@@ -282,9 +314,9 @@
     const cs = getComputedStyle(node);
     if (cs.display === "none" || cs.visibility === "hidden") return;
 
-    if (REPLACED_TAGS.has(node.tagName) || hasVisibleBoxDecoration(node)) {
-      // 画像等の置換要素、または見た目の区切りを持つ要素はそれ自体の箱を丸ごと使う
-      // (中身を個別に見て狭める必要はない)。
+    if (REPLACED_TAGS.has(node.tagName) || hasHorizontalBoxDecoration(node)) {
+      // 画像等の置換要素、または横方向に見た目の区切りを持つ要素はそれ自体の箱を
+      // 丸ごと使う(中身を個別に見て狭める必要はない)。
       const rect = node.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) rects.push(rect);
       return;
@@ -295,27 +327,31 @@
     }
   }
 
-  // 要素の「見た目で認識できる範囲」を返す。可視コンテンツが見つからない場合は
+  // 要素の「見た目で認識できる範囲」を返す(横幅のみ内容に合わせて狭める。
+  // 縦方向は常に要素自体の箱をそのまま使う)。可視コンテンツが見つからない場合は
   // 元の getBoundingClientRect() にフォールバックする。
   function computeVisualRect(target) {
     const fullRect = target.getBoundingClientRect();
-    if (hasVisibleBoxDecoration(target)) return fullRect;
+    if (hasHorizontalBoxDecoration(target)) return fullRect;
 
     const rects = [];
     collectVisualRects(target, rects);
     if (rects.length === 0) return fullRect;
 
     let left = Infinity;
-    let top = Infinity;
     let right = -Infinity;
-    let bottom = -Infinity;
     for (const r of rects) {
       left = Math.min(left, r.left);
-      top = Math.min(top, r.top);
       right = Math.max(right, r.right);
-      bottom = Math.max(bottom, r.bottom);
     }
-    return { left, top, width: right - left, height: bottom - top, right, bottom };
+    return {
+      left,
+      top: fullRect.top,
+      width: right - left,
+      height: fullRect.height,
+      right,
+      bottom: fullRect.bottom,
+    };
   }
 
   function startElementSelect() {
