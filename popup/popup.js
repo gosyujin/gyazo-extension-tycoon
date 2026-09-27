@@ -1,7 +1,5 @@
 const messageEl = document.getElementById("message");
 const recordStatusEl = document.getElementById("record-status");
-const btnRecordRect = document.getElementById("btn-record-rect");
-const btnRecordElement = document.getElementById("btn-record-element");
 const btnRecordVisible = document.getElementById("btn-record-visible");
 const btnRecordStop = document.getElementById("btn-record-stop");
 
@@ -21,6 +19,9 @@ async function send(type, extra = {}) {
   }
 }
 
+// 矩形選択・要素選択は「範囲を選ぶ」だけをここで開始する。選んだ範囲に対して
+// 画像保存/録画するかどうかは、ページ側に表示されるツールバーで選ぶ
+// (選択操作のためこのpopup自体は閉じる必要がある)。
 document.getElementById("btn-rect").addEventListener("click", async () => {
   await send("START_RECT_SELECT");
   window.close();
@@ -43,24 +44,10 @@ document.getElementById("btn-fullpage").addEventListener("click", async () => {
 
 function renderRecordingState(state) {
   const isRecording = !!state?.isRecording;
-  btnRecordRect.disabled = isRecording;
-  btnRecordElement.disabled = isRecording;
   btnRecordVisible.disabled = isRecording;
   btnRecordStop.disabled = !isRecording;
   recordStatusEl.textContent = isRecording ? "録画中...(停止するとGIFが保存されます)" : "";
 }
-
-// 矩形選択・要素選択は、ページ側のオーバーレイで選択が終わったタイミングで
-// 録画が始まる(選択中はこのpopupは閉じている必要があるため)。
-btnRecordRect.addEventListener("click", async () => {
-  await send("START_RECT_SELECT", { mode: "record" });
-  window.close();
-});
-
-btnRecordElement.addEventListener("click", async () => {
-  await send("START_ELEMENT_SELECT", { mode: "record" });
-  window.close();
-});
 
 btnRecordVisible.addEventListener("click", async () => {
   btnRecordVisible.disabled = true;
@@ -72,6 +59,13 @@ btnRecordStop.addEventListener("click", async () => {
   btnRecordStop.disabled = true;
   const response = await send("STOP_RECORDING");
   if (response?.recordingState) renderRecordingState(response.recordingState);
+  window.close();
+});
+
+// キーボードショートカットの割り当てはChrome標準の画面(chrome://extensions/shortcuts)
+// に任せる方針のため、独自の設定UIは作らずそこへのショートカットだけ用意する。
+document.getElementById("btn-shortcuts").addEventListener("click", () => {
+  chrome.tabs.create({ url: "chrome://extensions/shortcuts" });
   window.close();
 });
 

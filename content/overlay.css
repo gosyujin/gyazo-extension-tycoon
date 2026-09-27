@@ -9,6 +9,7 @@
 .gyazo-ext-tycoon-selection-box {
   display: none;
   position: fixed;
+  z-index: 2147483647;
   border: 1px solid #2f80ed;
   background: rgba(47, 128, 237, 0.15);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
@@ -22,4 +23,46 @@
   border: 2px solid #eb5757;
   background: rgba(235, 87, 87, 0.12);
   transition: all 60ms ease-out;
+}
+
+/* 選択確定後(ツールバー表示中)は追従を止めた状態を示すため色を変える */
+.gyazo-ext-tycoon-selection-box-locked {
+  transition: none;
+}
+
+.gyazo-ext-tycoon-highlight-locked {
+  transition: none;
+  border-color: #2f80ed;
+  background: rgba(47, 128, 237, 0.15);
+}
+
+.gyazo-ext-tycoon-toolbar {
+  position: fixed;
+  z-index: 2147483647;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.gyazo-ext-tycoon-toolbar button {
+  padding: 6px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fafafa;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.gyazo-ext-tycoon-toolbar button:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.gyazo-ext-tycoon-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }

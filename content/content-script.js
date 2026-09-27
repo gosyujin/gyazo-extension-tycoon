@@ -1,6 +1,11 @@
 // Content script: 矩形選択・要素選択のオーバーレイUIと、フルページ/大きい要素向けの
 // 「スクロールしながら分割キャプチャ」ループを担当する。
 // 実際の画素データの加工(トリミング・結合)は行わない(offscreen document の責務)。
+//
+// 矩形選択・要素選択は「範囲を選ぶ」と「その範囲に対して何をするか(画像保存/録画)」を
+// 分離している。選択が確定すると、選択範囲のそばに「画像保存」「録画開始/停止」の
+// ツールバーを表示し、Escで解除するまで同じ選択を保持する。保持している間は
+// 「画像保存」を何度でも押して連続保存できる。
 (() => {
   // 二重注入ガード(popupから複数回 START_* が来ても安全にする)
   if (window.__gyazoExtTycoonInjected) {
@@ -17,18 +22,22 @@
   const MAX_TILES = 80; // フルページ撮影の安全上限(暴走防止の暫定値。要調整)
   const SCROLL_SETTLE_MS = 300; // スクロール後、再描画/遅延読み込みを待つ暫定ディレイ
 
-  let overlayEl = null;
+  let overlayEl = null; // 矩形ドラッグ中だけ存在する全面オーバーレイ(ドラッグ確定後は外す)
   let selectionBoxEl = null;
   let highlightEl = null;
+  let toolbarEl = null;
   let dragStart = null;
   let keydownHandler = null;
 
   function cleanupOverlay() {
     overlayEl?.remove();
+    selectionBoxEl?.remove();
     highlightEl?.remove();
+    toolbarEl?.remove();
     overlayEl = null;
     selectionBoxEl = null;
     highlightEl = null;
+    toolbarEl = null;
     dragStart = null;
     if (keydownHandler) {
       window.removeEventListener("keydown", keydownHandler, true);
@@ -42,31 +51,109 @@
     chrome.runtime.sendMessage({ type: "SELECTION_CANCELLED", message });
   }
 
-  function armEscapeToCancel(onCancel) {
+  // Escキーで選択を解除する。onEscapeは任意の後処理(ログ出力など)。
+  function armEscapeToCancel(onEscape) {
     keydownHandler = (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         cleanupOverlay();
-        onCancel("Escape");
+        onEscape?.();
       }
     };
     window.addEventListener("keydown", keydownHandler, true);
   }
 
+  // --- 選択確定後の操作ツールバー(矩形選択・要素選択で共通) ---
+  // canRecord=false の場合は録画ボタンを disabled にし、recordDisabledReason を
+  // title(ツールチップ)に表示する。
+  function showActionToolbar(anchorRect, { onSave, canRecord, onStartRecording, recordDisabledReason }) {
+    toolbarEl?.remove();
+    toolbarEl = document.createElement("div");
+    toolbarEl.className = "gyazo-ext-tycoon-toolbar";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.textContent = "画像保存";
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      try {
+        await onSave();
+      } catch (err) {
+        console.error(LOG_PREFIX, "save failed", err);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+    toolbarEl.appendChild(saveBtn);
+
+    const recordBtn = document.createElement("button");
+    recordBtn.type = "button";
+    recordBtn.textContent = "録画開始";
+
+    async function refreshRecordLabel() {
+      try {
+        const state = await chrome.runtime.sendMessage({ type: "GET_RECORDING_STATE" });
+        recordBtn.textContent = state?.isRecording ? "録画停止" : "録画開始";
+      } catch (err) {
+        console.error(LOG_PREFIX, "GET_RECORDING_STATE failed", err);
+      }
+    }
+
+    if (!canRecord) {
+      recordBtn.disabled = true;
+      recordBtn.title = recordDisabledReason ?? "";
+    } else {
+      recordBtn.addEventListener("click", async () => {
+        recordBtn.disabled = true;
+        try {
+          const state = await chrome.runtime.sendMessage({ type: "GET_RECORDING_STATE" });
+          if (state?.isRecording) {
+            await chrome.runtime.sendMessage({ type: "STOP_RECORDING" });
+          } else {
+            await onStartRecording();
+          }
+        } catch (err) {
+          console.error(LOG_PREFIX, "toggle recording failed", err);
+        } finally {
+          await refreshRecordLabel();
+          recordBtn.disabled = false;
+        }
+      });
+      refreshRecordLabel();
+    }
+    toolbarEl.appendChild(recordBtn);
+
+    document.documentElement.appendChild(toolbarEl);
+    positionToolbar(toolbarEl, anchorRect);
+  }
+
+  // 選択範囲の下に置く。画面下端からはみ出す場合は上に置く。
+  function positionToolbar(el, rect) {
+    const margin = 6;
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = window.innerHeight;
+    const left = Math.max(0, Math.min(rect.left, viewportWidth - el.offsetWidth));
+    const below = rect.top + rect.height + margin;
+    const fitsBelow = below + el.offsetHeight <= viewportHeight;
+    const top = fitsBelow ? below : Math.max(0, rect.top - margin - el.offsetHeight);
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }
+
   // --- 矩形選択 ---
-  // mode: "capture"(既定, PNG保存) | "record"(GIF録画をこの範囲で開始する)
-  function startRectSelect(mode = "capture") {
-    log("startRectSelect", { mode });
+  function startRectSelect() {
+    log("startRectSelect");
     cleanupOverlay();
     overlayEl = document.createElement("div");
     overlayEl.className = "gyazo-ext-tycoon-overlay";
-    selectionBoxEl = document.createElement("div");
-    selectionBoxEl.className = "gyazo-ext-tycoon-selection-box";
-    overlayEl.appendChild(selectionBoxEl);
     document.documentElement.appendChild(overlayEl);
 
-    armEscapeToCancel(notifyCancelled);
+    selectionBoxEl = document.createElement("div");
+    selectionBoxEl.className = "gyazo-ext-tycoon-selection-box";
+    document.documentElement.appendChild(selectionBoxEl);
+
+    armEscapeToCancel(() => log("rect selection released via Escape"));
 
     const onMouseDown = (e) => {
       dragStart = { x: e.clientX, y: e.clientY };
@@ -80,32 +167,18 @@
     const onMouseUp = (e) => {
       if (!dragStart) return;
       const rect = rectFromPoints(dragStart, { x: e.clientX, y: e.clientY });
+      dragStart = null;
+      if (rect.width < 2 || rect.height < 2) {
+        // ミスクリック程度の小さすぎるドラッグは無視し、同じ選択待機状態を保つ
+        // (選択自体をキャンセルすると毎回popupから再度呼び出す必要が出るため)。
+        selectionBoxEl.style.display = "none";
+        return;
+      }
+      log("rect selected", rect);
       overlayEl.removeEventListener("mousedown", onMouseDown);
       overlayEl.removeEventListener("mousemove", onMouseMove);
       overlayEl.removeEventListener("mouseup", onMouseUp);
-      cleanupOverlay();
-      if (rect.width < 2 || rect.height < 2) {
-        notifyCancelled(`rect too small (drag needed): ${JSON.stringify(rect)}`);
-        return;
-      }
-      log("rect selected", rect, { mode });
-      // 録画(record)は tabCapture の映像フレームを直接クロップするため、dpr倍では
-      // なく「映像の実解像度 / ビューポートのCSS px」の実測比率で変換する必要がある
-      // (理由はoffscreen.jsのstartRecording()内コメント参照)。そのためビューポートの
-      // CSS pxサイズを一緒に送る。
-      const message =
-        mode === "record"
-          ? {
-              type: "RECT_READY_FOR_RECORDING",
-              rect,
-              viewportWidth: document.documentElement.clientWidth,
-              viewportHeight: window.innerHeight,
-            }
-          : { type: "CROP_SELECTION_READY", rect, dpr: window.devicePixelRatio || 1 };
-      chrome.runtime
-        .sendMessage(message)
-        .then((res) => log(message.type, "response", res))
-        .catch((err) => console.error(LOG_PREFIX, message.type, "failed", err));
+      lockRectSelection(rect);
     };
 
     function updateSelectionBox(x, y) {
@@ -121,6 +194,37 @@
     overlayEl.addEventListener("mouseup", onMouseUp);
   }
 
+  function lockRectSelection(rect) {
+    // ドラッグ検出用の全面オーバーレイ(暗い背景・ページ操作をブロックする)は
+    // 選択確定後は不要なので外す。選択枠とツールバーだけを残し、ページ自体は
+    // 普通に操作できるようにする(録画中にページを操作したい場合もあるため)。
+    overlayEl?.remove();
+    overlayEl = null;
+    selectionBoxEl.classList.add("gyazo-ext-tycoon-selection-box-locked");
+
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = window.innerHeight;
+
+    showActionToolbar(rect, {
+      onSave: async () => {
+        const res = await chrome.runtime.sendMessage({
+          type: "CROP_SELECTION_READY",
+          rect,
+          dpr: window.devicePixelRatio || 1,
+        });
+        log("CROP_SELECTION_READY response", res);
+      },
+      canRecord: true,
+      onStartRecording: () =>
+        chrome.runtime.sendMessage({
+          type: "RECT_READY_FOR_RECORDING",
+          rect,
+          viewportWidth,
+          viewportHeight,
+        }),
+    });
+  }
+
   function rectFromPoints(a, b) {
     const left = Math.min(a.x, b.x);
     const top = Math.min(a.y, b.y);
@@ -130,15 +234,14 @@
   }
 
   // --- 要素選択 ---
-  // mode: "capture"(既定, PNG保存) | "record"(GIF録画をこの要素の範囲で開始する)
-  function startElementSelect(mode = "capture") {
-    log("startElementSelect", { mode });
+  function startElementSelect() {
+    log("startElementSelect");
     cleanupOverlay();
     highlightEl = document.createElement("div");
     highlightEl.className = "gyazo-ext-tycoon-highlight";
     document.documentElement.appendChild(highlightEl);
 
-    armEscapeToCancel(notifyCancelled);
+    armEscapeToCancel(() => log("element selection released via Escape"));
 
     const onMouseMove = (e) => {
       const target = document.elementFromPoint(e.clientX, e.clientY);
@@ -151,77 +254,74 @@
       highlightEl.dataset.targetTag = target.tagName;
     };
 
-    const onClick = async (e) => {
+    const onClick = (e) => {
       e.preventDefault();
       e.stopPropagation();
       const target = document.elementFromPoint(e.clientX, e.clientY);
       window.removeEventListener("mousemove", onMouseMove, true);
       window.removeEventListener("click", onClick, true);
-      cleanupOverlay();
       if (!target) {
+        cleanupOverlay();
         notifyCancelled("no element under click point");
         return;
       }
       log("element clicked", target.tagName, target.className);
-      await handleElementSelected(target, mode);
+      lockElementSelection(target);
     };
 
     window.addEventListener("mousemove", onMouseMove, true);
     window.addEventListener("click", onClick, true);
   }
 
-  async function handleElementSelected(target, mode = "capture") {
-    const dpr = window.devicePixelRatio || 1;
+  function lockElementSelection(target) {
     const rect = target.getBoundingClientRect();
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight;
-
     const fitsInViewport =
       rect.top >= 0 &&
       rect.left >= 0 &&
       rect.bottom <= viewportHeight &&
       rect.right <= viewportWidth;
-
-    log("handleElementSelected", { rect, viewportWidth, viewportHeight, fitsInViewport, mode });
-
-    if (fitsInViewport) {
-      const rectPayload = {
-        left: rect.left,
-        top: rect.top,
-        width: rect.width,
-        height: rect.height,
-      };
-      const message =
-        mode === "record"
-          ? { type: "RECT_READY_FOR_RECORDING", rect: rectPayload, viewportWidth, viewportHeight }
-          : { type: "CROP_SELECTION_READY", rect: rectPayload, dpr };
-      chrome.runtime
-        .sendMessage(message)
-        .then((res) => log(message.type, "response", res))
-        .catch((err) => console.error(LOG_PREFIX, message.type, "failed", err));
-      return;
-    }
-
-    if (mode === "record") {
-      // GIF録画はライブ映像を毎フレーム切り出す都合上、フルページ撮影のような
-      // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
-      // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ対応する。
-      notifyCancelled(
-        `element does not fit in viewport, GIF recording only supports elements within it: ${JSON.stringify(rect)}`,
-        "選択した要素が画面からはみ出しているため録画できません(GIF録画は画面内に収まる要素のみ対応しています)"
-      );
-      return;
-    }
-
-    // ビューポートより大きい/画面外にはみ出す要素は、フルページと同じ
-    // タイル分割撮影で対応する(ページ絶対座標に変換して範囲指定)。
     const pageLeft = rect.left + window.scrollX;
     const pageTop = rect.top + window.scrollY;
-    await runTileCapture({
-      pageLeft,
-      pageTop,
-      width: rect.width,
-      height: rect.height,
+
+    log("lockElementSelection", { rect, viewportWidth, viewportHeight, fitsInViewport });
+
+    highlightEl.classList.add("gyazo-ext-tycoon-highlight-locked");
+    highlightEl.style.left = `${rect.left}px`;
+    highlightEl.style.top = `${rect.top}px`;
+    highlightEl.style.width = `${rect.width}px`;
+    highlightEl.style.height = `${rect.height}px`;
+
+    const rectPayload = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+
+    showActionToolbar(rect, {
+      onSave: async () => {
+        if (fitsInViewport) {
+          const res = await chrome.runtime.sendMessage({
+            type: "CROP_SELECTION_READY",
+            rect: rectPayload,
+            dpr: window.devicePixelRatio || 1,
+          });
+          log("CROP_SELECTION_READY response", res);
+          return;
+        }
+        // ビューポートより大きい/画面外にはみ出す要素は、フルページと同じ
+        // タイル分割撮影で対応する(ページ絶対座標に変換して範囲指定)。
+        await runTileCapture({ pageLeft, pageTop, width: rect.width, height: rect.height });
+      },
+      canRecord: fitsInViewport,
+      // GIF録画はライブ映像を毎フレーム切り出す都合上、フルページ撮影のような
+      // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
+      // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ録画可能にする。
+      recordDisabledReason: "選択した要素は画面からはみ出しているため録画できません(画像保存は可能です)",
+      onStartRecording: () =>
+        chrome.runtime.sendMessage({
+          type: "RECT_READY_FOR_RECORDING",
+          rect: rectPayload,
+          viewportWidth,
+          viewportHeight,
+        }),
     });
   }
 
@@ -292,7 +392,7 @@
     window.scrollTo(originalScrollX, originalScrollY);
 
     if (tiles.length === 0) {
-      notifyCancelled("no tiles captured");
+      notifyCancelled("no tiles captured", "保存に失敗しました(タイル撮影に失敗しました)");
       return;
     }
 
@@ -313,11 +413,11 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     switch (message.type) {
       case "START_RECT_SELECT":
-        startRectSelect(message.mode);
+        startRectSelect();
         sendResponse({ ok: true });
         break;
       case "START_ELEMENT_SELECT":
-        startElementSelect(message.mode);
+        startElementSelect();
         sendResponse({ ok: true });
         break;
       case "START_FULLPAGE_CAPTURE":

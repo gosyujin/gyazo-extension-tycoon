@@ -105,6 +105,74 @@ async function downloadUrl(url, filename) {
   return downloadId;
 }
 
+async function injectContentScript(tab, { withOverlayCss = false } = {}) {
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ["content/content-script.js"],
+  });
+  if (withOverlayCss) {
+    await chrome.scripting.insertCSS({
+      target: { tabId: tab.id },
+      files: ["content/overlay.css"],
+    });
+  }
+}
+
+// 以下は popup のボタンクリックと chrome.commands のキーボードショートカットの
+// どちらからも同じ動作になるよう、実際の処理をここに共通化しておく
+// ([popup/popup.js]・chrome.commands.onCommand の両方から呼ばれる)。
+
+async function captureVisiblePage() {
+  const tab = await getActiveTab();
+  const dataUrl = await captureActiveTabPng(tab.windowId);
+  await downloadUrl(dataUrl, timestampedFilename("png"));
+  notify("表示中のページを保存しました");
+}
+
+async function startRectSelectOnActiveTab() {
+  const tab = await getActiveTab();
+  await injectContentScript(tab, { withOverlayCss: true });
+  await chrome.tabs.sendMessage(tab.id, { type: "START_RECT_SELECT" });
+}
+
+async function startElementSelectOnActiveTab() {
+  const tab = await getActiveTab();
+  await injectContentScript(tab, { withOverlayCss: true });
+  await chrome.tabs.sendMessage(tab.id, { type: "START_ELEMENT_SELECT" });
+}
+
+async function startFullpageCaptureOnActiveTab() {
+  const tab = await getActiveTab();
+  await injectContentScript(tab);
+  await chrome.tabs.sendMessage(tab.id, { type: "START_FULLPAGE_CAPTURE" });
+}
+
+async function startRecordingVisiblePage() {
+  const tab = await getActiveTab();
+  const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+  log("got tabCapture streamId, starting offscreen recording (visible page)");
+  const result = await sendToOffscreen({ type: "START_RECORDING", streamId });
+  if (result?.ok) {
+    setRecordingBadge(true);
+  } else {
+    notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+  }
+  return { recordingState: { isRecording: !!result?.ok }, result };
+}
+
+async function stopRecordingAndSave() {
+  const filename = timestampedFilename("gif");
+  const result = await sendToOffscreen({ type: "STOP_RECORDING", filename });
+  setRecordingBadge(false);
+  if (result?.ok && result.url) {
+    await downloadUrl(result.url, filename);
+    notify(`GIFを保存しました(${result.frameCount}フレーム)`);
+  } else {
+    notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
+  }
+  return { recordingState: { isRecording: false }, result };
+}
+
 async function sendToOffscreen(message) {
   await ensureOffscreenDocument();
   log("-> offscreen", message.type);
@@ -129,61 +197,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   (async () => {
     switch (message.type) {
-      // --- popup からの操作開始要求 ---
+      // --- popup / キーボードショートカットからの操作開始要求 ---
       case "CAPTURE_VISIBLE_PAGE": {
-        const tab = await getActiveTab();
-        const dataUrl = await captureActiveTabPng(tab.windowId);
-        await downloadUrl(dataUrl, timestampedFilename("png"));
-        notify("表示中のページを保存しました");
+        await captureVisiblePage();
         sendResponse({ ok: true });
         break;
       }
 
       case "START_RECT_SELECT": {
-        const tab = await getActiveTab();
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ["content/content-script.js"],
-        });
-        await chrome.scripting.insertCSS({
-          target: { tabId: tab.id },
-          files: ["content/overlay.css"],
-        });
-        await chrome.tabs.sendMessage(tab.id, {
-          type: "START_RECT_SELECT",
-          mode: message.mode,
-        });
+        await startRectSelectOnActiveTab();
         sendResponse({ ok: true });
         break;
       }
 
       case "START_ELEMENT_SELECT": {
-        const tab = await getActiveTab();
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ["content/content-script.js"],
-        });
-        await chrome.scripting.insertCSS({
-          target: { tabId: tab.id },
-          files: ["content/overlay.css"],
-        });
-        await chrome.tabs.sendMessage(tab.id, {
-          type: "START_ELEMENT_SELECT",
-          mode: message.mode,
-        });
+        await startElementSelectOnActiveTab();
         sendResponse({ ok: true });
         break;
       }
 
       case "START_FULLPAGE_CAPTURE": {
-        const tab = await getActiveTab();
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ["content/content-script.js"],
-        });
-        await chrome.tabs.sendMessage(tab.id, {
-          type: "START_FULLPAGE_CAPTURE",
-        });
+        await startFullpageCaptureOnActiveTab();
         sendResponse({ ok: true });
         break;
       }
@@ -280,18 +314,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // 表示中のページ(タブ全体)をそのまま録画開始する。
       case "START_RECORDING_VISIBLE": {
-        const tab = await getActiveTab();
-        const streamId = await chrome.tabCapture.getMediaStreamId({
-          targetTabId: tab.id,
-        });
-        log("got tabCapture streamId, starting offscreen recording (visible page)");
-        const result = await sendToOffscreen({ type: "START_RECORDING", streamId });
-        if (result?.ok) {
-          setRecordingBadge(true);
-        } else {
-          notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
-        }
-        sendResponse({ recordingState: { isRecording: !!result?.ok }, result });
+        sendResponse(await startRecordingVisiblePage());
         break;
       }
 
@@ -312,7 +335,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         if (result?.ok) {
           setRecordingBadge(true);
-          notify("録画を開始しました(ツールバーのアイコンから停止できます)");
+          notify("録画を開始しました(ページ上のツールバーまたは拡張機能アイコンから停止できます)");
         } else {
           notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
         }
@@ -321,16 +344,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case "STOP_RECORDING": {
-        const filename = timestampedFilename("gif");
-        const result = await sendToOffscreen({ type: "STOP_RECORDING", filename });
-        setRecordingBadge(false);
-        if (result?.ok && result.url) {
-          await downloadUrl(result.url, filename);
-          notify(`GIFを保存しました(${result.frameCount}フレーム)`);
-        } else {
-          notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
-        }
-        sendResponse({ recordingState: { isRecording: false }, result });
+        sendResponse(await stopRecordingAndSave());
         break;
       }
 
@@ -347,4 +361,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   });
 
   return true; // sendResponse を非同期に呼ぶことを伝える
+});
+
+// キーボードショートカット(chrome://extensions/shortcuts でユーザーが割り当てる)。
+// manifest.json の "commands" で名前だけ宣言し、実際のキー割り当てはChrome標準の
+// 画面に任せる方針(独自のオプション画面は作らない)。popupのボタンと全く同じ
+// 処理を呼ぶことで、ショートカットからも「ワンアクションで起動」できるようにする。
+chrome.commands.onCommand.addListener((command) => {
+  log("command", command);
+  (async () => {
+    switch (command) {
+      case "capture-rect":
+        await startRectSelectOnActiveTab();
+        break;
+      case "capture-element":
+        await startElementSelectOnActiveTab();
+        break;
+      case "capture-visible":
+        await captureVisiblePage();
+        break;
+      case "capture-fullpage":
+        await startFullpageCaptureOnActiveTab();
+        break;
+      case "record-visible":
+        await startRecordingVisiblePage();
+        break;
+      case "record-stop":
+        await stopRecordingAndSave();
+        break;
+      default:
+        log("unhandled command", command);
+    }
+  })().catch((err) => {
+    console.error(LOG_PREFIX, "command failed", command, err);
+    notify(`ショートカットの実行に失敗しました(${command}): ${err?.message || err}`, {
+      isError: true,
+    });
+  });
 });

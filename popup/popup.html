@@ -9,23 +9,31 @@
     <h1>Gyazo Extension Tycoon</h1>
 
     <section>
+      <h2>範囲を選んで操作</h2>
+      <button id="btn-rect">矩形選択をする</button>
+      <button id="btn-element">要素選択をする</button>
+      <p class="hint">
+        選択すると、範囲のそばに表示される「画像保存」「録画開始」ボタンで操作します。
+        Escで選択解除するまで同じ範囲を保持するので、連続保存もできます。
+      </p>
+    </section>
+
+    <section>
       <h2>PNG</h2>
-      <button id="btn-rect">矩形選択で保存</button>
-      <button id="btn-element">要素選択で保存</button>
       <button id="btn-visible">表示中のページを保存</button>
       <button id="btn-fullpage">ページ全体を保存</button>
     </section>
 
     <section>
       <h2>GIF(パラパラ漫画)</h2>
-      <button id="btn-record-rect">矩形選択で録画開始</button>
-      <button id="btn-record-element">要素選択で録画開始</button>
       <button id="btn-record-visible">表示中のページを録画開始</button>
       <button id="btn-record-stop" disabled>録画停止してGIF保存</button>
       <p id="record-status" class="hint"></p>
     </section>
 
     <p id="message" class="hint"></p>
+
+    <button id="btn-shortcuts" class="link-button">⌨ キーボードショートカットを設定</button>
 
     <script src="popup.js"></script>
   </body>

@@ -55,3 +55,18 @@ button:disabled {
   min-height: 14px;
   margin: 4px 0 0;
 }
+
+.link-button {
+  border: none;
+  background: none;
+  color: #2f80ed;
+  font-size: 11px;
+  text-align: center;
+  padding: 4px 0 0;
+  margin: 8px 0 0;
+}
+
+.link-button:hover {
+  background: none;
+  text-decoration: underline;
+}
