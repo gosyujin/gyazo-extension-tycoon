@@ -248,6 +248,76 @@
   }
 
   // --- 要素選択 ---
+  // 要素の getBoundingClientRect() は、その要素自身に見た目の区切り(背景色/背景画像/
+  // 枠線)が無い場合、実際に目に見えている内容(テキストや画像)より広いことがある
+  // (例: リストの1行が親コンテナいっぱいの幅を持つブロック要素で、中の文字はその
+  // 一部しか占めていない場合、右側の余白ごと選択・録画されてしまう)。
+  // 「選択した領域=見た目で認識できる範囲」にするため、要素自体に見た目の区切りが
+  // なければ、中の可視コンテンツ(テキスト/画像等)の外接矩形まで狭める。
+  // 要素自体に背景色/枠線等の区切りがある場合は、その区切り自体が「見た目の範囲」
+  // なので狭めない(例: カード状のUIは枠線込みでそのまま扱う)。
+  function hasVisibleBoxDecoration(el) {
+    const cs = getComputedStyle(el);
+    const isTransparent = (color) => !color || color === "transparent" || color === "rgba(0, 0, 0, 0)";
+    if (!isTransparent(cs.backgroundColor)) return true;
+    if (cs.backgroundImage && cs.backgroundImage !== "none") return true;
+    return ["Top", "Right", "Bottom", "Left"].some((side) => {
+      const width = parseFloat(cs[`border${side}Width`]);
+      return width > 0 && cs[`border${side}Style`] !== "none" && !isTransparent(cs[`border${side}Color`]);
+    });
+  }
+
+  const REPLACED_TAGS = new Set(["IMG", "SVG", "CANVAS", "VIDEO", "IFRAME", "PICTURE"]);
+
+  function collectVisualRects(node, rects) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (!node.textContent.trim()) return;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) rects.push(rect);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const cs = getComputedStyle(node);
+    if (cs.display === "none" || cs.visibility === "hidden") return;
+
+    if (REPLACED_TAGS.has(node.tagName) || hasVisibleBoxDecoration(node)) {
+      // 画像等の置換要素、または見た目の区切りを持つ要素はそれ自体の箱を丸ごと使う
+      // (中身を個別に見て狭める必要はない)。
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) rects.push(rect);
+      return;
+    }
+
+    for (const child of node.childNodes) {
+      collectVisualRects(child, rects);
+    }
+  }
+
+  // 要素の「見た目で認識できる範囲」を返す。可視コンテンツが見つからない場合は
+  // 元の getBoundingClientRect() にフォールバックする。
+  function computeVisualRect(target) {
+    const fullRect = target.getBoundingClientRect();
+    if (hasVisibleBoxDecoration(target)) return fullRect;
+
+    const rects = [];
+    collectVisualRects(target, rects);
+    if (rects.length === 0) return fullRect;
+
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const r of rects) {
+      left = Math.min(left, r.left);
+      top = Math.min(top, r.top);
+      right = Math.max(right, r.right);
+      bottom = Math.max(bottom, r.bottom);
+    }
+    return { left, top, width: right - left, height: bottom - top, right, bottom };
+  }
+
   function startElementSelect() {
     log("startElementSelect");
     cleanupOverlay();
@@ -260,7 +330,7 @@
     const onMouseMove = (e) => {
       const target = document.elementFromPoint(e.clientX, e.clientY);
       if (!target || target === highlightEl) return;
-      const r = target.getBoundingClientRect();
+      const r = computeVisualRect(target);
       highlightEl.style.left = `${r.left}px`;
       highlightEl.style.top = `${r.top}px`;
       highlightEl.style.width = `${r.width}px`;
@@ -288,7 +358,7 @@
   }
 
   function lockElementSelection(target) {
-    const rect = target.getBoundingClientRect();
+    const rect = computeVisualRect(target);
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight;
     const fitsInViewport =
