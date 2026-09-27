@@ -307,7 +307,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           type: "START_RECORDING",
           streamId,
           rect: message.rect,
-          dpr: message.dpr,
+          viewportWidth: message.viewportWidth,
+          viewportHeight: message.viewportHeight,
         });
         if (result?.ok) {
           setRecordingBadge(true);

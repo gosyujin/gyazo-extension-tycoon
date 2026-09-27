@@ -25,6 +25,13 @@ const GIF_PALETTE_SIZE = 256;
 // 再計算し、間のフレームは同じパレットを applyPalette() で使い回すことで
 // 実際の間隔を目標値に近づける(色の正確さより滑らかさを優先する方針)。
 const GIF_PALETTE_REFRESH_INTERVAL = 5;
+// getImageData/quantize/applyPalette は処理コストがピクセル数に比例するため、
+// フルページ(高dpr環境では実質4Kクラスの映像)をそのまま処理すると1フレームの
+// 処理時間が目標間隔を大きく超え、結果的に実際のフレームレートが低くガタガタした
+// 見た目になる(delayを実測記録するようにしても、そもそも実際に撮れるフレーム数が
+// 少なければなめらかにはならない)。そのため長辺がこの値を超える場合は、GIFに
+// 焼き込む前にこのサイズまで縮小してからエンコードする(画質より滑らかさを優先)。
+const GIF_MAX_DIMENSION = 960;
 
 let recording = null; // { stream, video, canvas, ctx, gif, intervalId, frameCount, width, height }
 
@@ -121,16 +128,22 @@ async function processTiles({ tiles, region, dpr, filename }) {
 }
 
 // --- GIF: tabCapture のライブストリームからフレームをサンプリングしてエンコード ---
-// rect/dpr が渡された場合(矩形選択・要素選択からの録画開始)は、processCrop() と
-// 同じ考え方(CSS px の rect に dpr を掛けて実ピクセル座標に変換)で映像内の
-// 該当領域だけを毎フレーム切り出す。渡されなければタブ全体を録画する。
-async function startRecording({ streamId, rect, dpr }) {
+// rect/viewportWidth/viewportHeight が渡された場合(矩形選択・要素選択からの録画
+// 開始)は、映像内の該当領域だけを毎フレーム切り出す。渡されなければタブ全体を録画する。
+//
+// クロップ座標は rect(CSS px, ビューポート相対)を dpr 倍するのではなく、
+// 「映像の実解像度 / 選択時のビューポートCSS pxサイズ」を実測した比率で変換する。
+// captureVisibleTab(PNG側で使用)は仕様上 devicePixelRatio 込みの実ピクセル解像度を
+// 返すことが保証されているが、tabCapture の getUserMedia 映像の解像度は必ずしも
+// devicePixelRatio と同じ倍率になるとは限らない(実機検証で dpr 倍だとズレることが
+// 確認された)。実測比率を使えば、映像の実解像度がどうであっても正しくクロップできる。
+async function startRecording({ streamId, rect, viewportWidth, viewportHeight }) {
   if (recording) {
     log("startRecording called while already recording");
     return { ok: false, error: "既に録画中です" };
   }
 
-  log("startRecording", { streamId, rect, dpr });
+  log("startRecording", { streamId, rect, viewportWidth, viewportHeight });
   const { GIFEncoder, quantize, applyPalette } = await import(
     "../vendor/gifenc/gifenc.esm.js"
   );
@@ -168,11 +181,13 @@ async function startRecording({ streamId, rect, dpr }) {
 
   let crop = null;
   if (rect) {
-    const sx = Math.max(0, Math.round(rect.left * dpr));
-    const sy = Math.max(0, Math.round(rect.top * dpr));
-    const sw = Math.min(Math.round(rect.width * dpr), videoWidth - sx);
-    const sh = Math.min(Math.round(rect.height * dpr), videoHeight - sy);
-    log("crop bounds", { videoWidth, videoHeight, sx, sy, sw, sh });
+    const scaleX = videoWidth / viewportWidth;
+    const scaleY = videoHeight / viewportHeight;
+    const sx = Math.max(0, Math.round(rect.left * scaleX));
+    const sy = Math.max(0, Math.round(rect.top * scaleY));
+    const sw = Math.min(Math.round(rect.width * scaleX), videoWidth - sx);
+    const sh = Math.min(Math.round(rect.height * scaleY), videoHeight - sy);
+    log("crop bounds", { videoWidth, videoHeight, viewportWidth, viewportHeight, scaleX, scaleY, sx, sy, sw, sh });
     if (sw <= 0 || sh <= 0) {
       stream.getTracks().forEach((t) => t.stop());
       return { ok: false, error: `録画範囲が不正です(sw=${sw}, sh=${sh})` };
@@ -180,8 +195,16 @@ async function startRecording({ streamId, rect, dpr }) {
     crop = { sx, sy, sw, sh };
   }
 
-  const width = crop ? crop.sw : videoWidth;
-  const height = crop ? crop.sh : videoHeight;
+  const sourceWidth = crop ? crop.sw : videoWidth;
+  const sourceHeight = crop ? crop.sh : videoHeight;
+  // 長辺が GIF_MAX_DIMENSION を超える場合は、以後のエンコード解像度そのものを
+  // 縮小する(理由は定数定義部を参照)。canvasの出力サイズをここで縮めておけば、
+  // captureGifFrame() の drawImage が縮小込みで描いてくれるため以降のコードは
+  // 変更不要。
+  const downscale = Math.min(1, GIF_MAX_DIMENSION / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * downscale));
+  const height = Math.max(1, Math.round(sourceHeight * downscale));
+  log("recording resolution", { sourceWidth, sourceHeight, width, height, downscale });
 
   const canvas = document.createElement("canvas");
   canvas.width = width;

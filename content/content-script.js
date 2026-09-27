@@ -89,9 +89,18 @@
         return;
       }
       log("rect selected", rect, { mode });
+      // 録画(record)は tabCapture の映像フレームを直接クロップするため、dpr倍では
+      // なく「映像の実解像度 / ビューポートのCSS px」の実測比率で変換する必要がある
+      // (理由はoffscreen.jsのstartRecording()内コメント参照)。そのためビューポートの
+      // CSS pxサイズを一緒に送る。
       const message =
         mode === "record"
-          ? { type: "RECT_READY_FOR_RECORDING", rect, dpr: window.devicePixelRatio || 1 }
+          ? {
+              type: "RECT_READY_FOR_RECORDING",
+              rect,
+              viewportWidth: document.documentElement.clientWidth,
+              viewportHeight: window.innerHeight,
+            }
           : { type: "CROP_SELECTION_READY", rect, dpr: window.devicePixelRatio || 1 };
       chrome.runtime
         .sendMessage(message)
@@ -184,7 +193,7 @@
       };
       const message =
         mode === "record"
-          ? { type: "RECT_READY_FOR_RECORDING", rect: rectPayload, dpr }
+          ? { type: "RECT_READY_FOR_RECORDING", rect: rectPayload, viewportWidth, viewportHeight }
           : { type: "CROP_SELECTION_READY", rect: rectPayload, dpr };
       chrome.runtime
         .sendMessage(message)
