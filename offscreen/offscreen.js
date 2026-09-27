@@ -137,25 +137,51 @@ async function processTiles({ tiles, region, dpr, filename }) {
 // 返すことが保証されているが、tabCapture の getUserMedia 映像の解像度は必ずしも
 // devicePixelRatio と同じ倍率になるとは限らない(実機検証で dpr 倍だとズレることが
 // 確認された)。実測比率を使えば、映像の実解像度がどうであっても正しくクロップできる。
-async function startRecording({ streamId, rect, viewportWidth, viewportHeight }) {
+//
+// それでもなお、矩形/要素選択からの録画で実機検証のたびに横方向のクロップずれが
+// 報告され続けた。考えられる原因は、getUserMedia に解像度の制約(width/height)を
+// 一切指定していないため、Chrome側が実際のタブサイズと無関係な解像度で映像を
+// 用意し(内部的なレターボックス/パディングが入るなど)、映像のどの矩形が
+// 実際のページのどの範囲に対応するのかが単純な比例計算では表せなくなっている
+// 可能性があること。そのため、rect付きの録画(選択範囲の録画)では
+// minWidth=maxWidth / minHeight=maxHeight を選択時のビューポートサイズ×dpr で
+// 明示的に指定し、PNG側(captureVisibleTab)と同じ「devicePixelRatio込みの実ピクセル
+// 解像度」で映像が用意されるよう強制する。その上で、実際に得られた
+// videoWidth/videoHeight を使った実測比率でのクロップ計算(上記)は保険として
+// 残す(要求した解像度が何らかの理由でそのまま通らなかった場合でも、実際の
+// 映像サイズを基準にする限り破綻しないため)。
+async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr }) {
   if (recording) {
     log("startRecording called while already recording");
     return { ok: false, error: "既に録画中です" };
   }
 
-  log("startRecording", { streamId, rect, viewportWidth, viewportHeight });
+  log("startRecording", { streamId, rect, viewportWidth, viewportHeight, dpr });
   const { GIFEncoder, quantize, applyPalette } = await import(
     "../vendor/gifenc/gifenc.esm.js"
   );
 
+  const videoConstraints = {
+    mandatory: {
+      chromeMediaSource: "tab",
+      chromeMediaSourceId: streamId,
+    },
+  };
+  if (rect && viewportWidth && viewportHeight) {
+    const targetWidth = Math.round(viewportWidth * (dpr || 1));
+    const targetHeight = Math.round(viewportHeight * (dpr || 1));
+    Object.assign(videoConstraints.mandatory, {
+      minWidth: targetWidth,
+      maxWidth: targetWidth,
+      minHeight: targetHeight,
+      maxHeight: targetHeight,
+    });
+    log("requesting exact capture resolution", { targetWidth, targetHeight });
+  }
+
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
-    video: {
-      mandatory: {
-        chromeMediaSource: "tab",
-        chromeMediaSourceId: streamId,
-      },
-    },
+    video: videoConstraints,
   });
   log("got MediaStream", stream.id, "tracks=", stream.getTracks().length);
 

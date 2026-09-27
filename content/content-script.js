@@ -80,11 +80,15 @@
     saveBtn.textContent = "画像保存";
     saveBtn.addEventListener("click", async () => {
       saveBtn.disabled = true;
+      // 録画と同様、選択枠(outlineEl)自体が撮影範囲の境界に重なって描画されている
+      // ため、キャプチャ中は非表示にしないと枠線がそのまま画像に写り込む。
+      if (outlineEl) outlineEl.style.visibility = "hidden";
       try {
         await onSave();
       } catch (err) {
         console.error(LOG_PREFIX, "save failed", err);
       } finally {
+        if (outlineEl) outlineEl.style.visibility = "";
         saveBtn.disabled = false;
       }
     });
@@ -234,6 +238,7 @@
           rect,
           viewportWidth,
           viewportHeight,
+          dpr: window.devicePixelRatio || 1,
         }),
       outlineEl: selectionBoxEl,
     });
@@ -445,6 +450,7 @@
           rect: rectPayload,
           viewportWidth: captureViewportWidth,
           viewportHeight,
+          dpr: window.devicePixelRatio || 1,
         }),
       outlineEl: highlightEl,
     });

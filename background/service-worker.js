@@ -332,6 +332,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           rect: message.rect,
           viewportWidth: message.viewportWidth,
           viewportHeight: message.viewportHeight,
+          dpr: message.dpr,
         });
         if (result?.ok) {
           setRecordingBadge(true);
