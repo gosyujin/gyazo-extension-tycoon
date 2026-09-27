@@ -11,7 +11,6 @@
   position: fixed;
   z-index: 2147483647;
   border: 1px solid #2f80ed;
-  background: rgba(47, 128, 237, 0.15);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
   pointer-events: none;
 }
@@ -21,7 +20,6 @@
   z-index: 2147483647;
   pointer-events: none;
   border: 2px solid #eb5757;
-  background: rgba(235, 87, 87, 0.12);
   transition: all 60ms ease-out;
 }
 
@@ -33,7 +31,6 @@
 .gyazo-ext-tycoon-highlight-locked {
   transition: none;
   border-color: #2f80ed;
-  background: rgba(47, 128, 237, 0.15);
 }
 
 .gyazo-ext-tycoon-toolbar {

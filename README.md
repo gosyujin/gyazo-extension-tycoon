@@ -204,3 +204,9 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - manifest を 0.5.0 に更新(処理方式そのものを変える、まとまった変更のため minor バンプ)。
   - **未検証**: このセッションも構文チェック(`node --check` 相当。`import.meta` を含むESMのため `vm.SourceTextModule` でのパース確認)のみで、実機での確認はできていない。特に、(1) 実際にガクガク感が改善したか、(2) Worker生成(`new Worker(new URL(...), { type: "module" })`)がChrome拡張機能のoffscreen document内で問題なく動作するか(offscreen.htmlの`<script type="module">`から呼ばれる前提だが、拡張機能のパッケージ化された `extension://` オリジンからのmodule worker生成は未検証)、(3) `MAX_PENDING_FRAMES` のガードが長時間録画時に発動して録画が破綻しないか、は実機での確認が必要。
   - → 0.5.0 を実機で試してもらい、**「だいぶなめらかになった」ことを確認できた**。GIFエンコード(quantize/applyPalette/writeFrame)をフレームサンプリングと別スレッド(Worker)に分離したことが、ガクガク感の主因(重いエンコード処理がサンプリング用の`setInterval`自体を止めていたこと)への対処として有効だったと考えられる。Worker生成(`new Worker(new URL(...), { type: "module" })`)がoffscreen document内で問題なく動作することもこれで確認できた。
+
+### 2026-09-27 (続き: 矩形選択・要素選択の選択枠を塗りつぶしなし・枠線のみに変更)
+- ユーザーから「範囲選択・矩形選択で選択範囲を枠線のみにできないか、範囲全体が色付けされていると少し見にくい」との要望を受けて対応した。
+- [content/overlay.css](content/overlay.css) の `.gyazo-ext-tycoon-selection-box`(矩形選択のドラッグ中の枠)、`.gyazo-ext-tycoon-highlight`(要素選択時のホバー枠)、および両者の `-locked`(選択確定後)バリアントから `background` 指定を削除し、`border` のみで範囲を示すようにした。枠線の色・太さ自体は変更していない。
+- manifest を 0.5.1 に更新(見た目のみの小さい変更のため patch バンプ)。
+- **未検証**: 構文チェックのみ。実機での見た目の確認が必要。
