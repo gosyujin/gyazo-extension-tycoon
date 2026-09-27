@@ -37,7 +37,8 @@ Gyazo / Imgur へのアップロードは未実装(将来の拡張ポイント�
 |---|---|
 | [background/service-worker.js](background/service-worker.js) | 全体のオーケストレーター。popup / content script / offscreen document 間のメッセージ中継、`chrome.tabs.captureVisibleTab` / `chrome.scripting` / `chrome.tabCapture` / `chrome.offscreen` の呼び出しを一元管理。Blob や canvas は一切扱わない。 |
 | [content/content-script.js](content/content-script.js) | ページ内に注入され、矩形選択・要素選択のオーバーレイ UI(選択確定後の「画像保存/録画開始」ツールバーを含む)と、フルページ/大きい要素向けの「スクロールしながら分割撮影」ループを担当。 |
-| [offscreen/offscreen.js](offscreen/offscreen.js) | Canvas によるトリミング/タイル結合、`MediaStream` を使った GIF 用フレームサンプリング、GIF エンコード、`chrome.downloads.download` の呼び出しを担当。 |
+| [offscreen/offscreen.js](offscreen/offscreen.js) | Canvas によるトリミング/タイル結合、`MediaStream` を使った GIF 用フレームサンプリング、`chrome.downloads.download` の呼び出しを担当。 |
+| [offscreen/gif-worker.js](offscreen/gif-worker.js) | GIF エンコード(パレット計算・色マッピング・LZW圧縮)専用の Web Worker。フレームサンプリングと同じスレッドで重いエンコード処理を行うとサンプリング自体が止まってカクつくため、offscreen.js から分離した(経緯は下記「実装ログ」参照)。 |
 | [popup/popup.html](popup/popup.html) / [popup.js](popup/popup.js) | ツールバーのボタン UI。 |
 | [vendor/gifenc](vendor/gifenc) | GIF エンコード用に [gifenc](https://github.com/mattdesl/gifenc)(MIT License)の配布用 ESM バンドルをそのまま同梱。ビルド不要で `import` できるため採用。 |
 
@@ -51,7 +52,7 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
 
 ## 既知の制限・今後調整が必要な暫定値
 
-- `GIF_FRAME_INTERVAL_MS`(GIFフレームサンプリングの目標間隔、現在 60ms)、`GIF_PALETTE_REFRESH_INTERVAL`(パレット再計算間隔、現在 5フレームに1回)、`GIF_MAX_DIMENSION`(エンコード解像度の長辺上限、現在 960px。これを超える場合は縮小してからエンコードする)、`GIF_MAX_FRAMES`(暴走防止用の最大フレーム数、現在 1500 = 目標間隔通りなら約90秒)は容量よりなめらかさを優先する方針の暫定値。画質・ファイルサイズ・CPU負荷を見ながら今後調整する([offscreen/offscreen.js](offscreen/offscreen.js) 冒頭の定数)。
+- `GIF_FRAME_INTERVAL_MS`(GIFフレームサンプリングの目標間隔、現在 33ms ≒ 30fps)、`GIF_PALETTE_REFRESH_INTERVAL`(パレット再計算間隔、現在 10フレームに1回)、`GIF_MAX_DIMENSION`(エンコード解像度の長辺上限、現在 960px。これを超える場合は縮小してからエンコードする)、`GIF_MAX_FRAMES`(暴走防止用の最大フレーム数、現在 2700 = 目標間隔通りなら約90秒)、`MAX_PENDING_FRAMES`(エンコードWorkerへの未処理フレームのバックログ上限、現在 120)は容量よりなめらかさを優先する方針の暫定値。画質・ファイルサイズ・CPU負荷を見ながら今後調整する([offscreen/offscreen.js](offscreen/offscreen.js) 冒頭の定数)。GIFエンコード自体(quantize/applyPalette/writeFrame)は [offscreen/gif-worker.js](offscreen/gif-worker.js) という専用Workerに分離されており、メインスレッド側はフレーム取り込み(drawImage/getImageData)のみを担当する(経緯は下記「実装ログ」参照)。
 - GIF録画の矩形選択・要素選択は、選択した範囲を毎フレーム切り出す都合上、ビューポートに収まる範囲のみ対応。ビューポートより大きい/画面外にはみ出す要素は録画できない(PNGのフルページ撮影のようなスクロールしながらのタイル結合は、録画中にスクロール位置を動かすと録画内容自体が乱れるため未対応)。
 - フルページ/大きい要素のタイル撮影は、スクロール後に固定ディレイ(`SCROLL_SETTLE_MS` = 300ms)を待つだけの素朴な実装。`position: fixed/sticky` 要素がタイルごとに重複して写り込む、遅延読み込み画像に対応できない、といった既知の制限がある。
 - アイコンは仮の単色プレースホルダー(`icons/`、`vendor` 同様に本物のデザインは未着手)。
@@ -190,3 +191,15 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - manifest を 0.4.2 に更新。
   - **未検証**: 引き続き構文チェックのみ。特に、解像度を明示指定したことで GIF録画の横方向クロップずれが実際に解消したか(まだ完全な原因特定はできていないため、これでも直らない場合は videoWidth/videoHeight の実測ログ(`[offscreen] crop bounds`)を実機のDevToolsコンソールで見せてもらう必要がある)、および画像保存で選択枠が写り込まなくなったかの再確認が必要。
   - → 0.4.2 をユーザーに実機で試してもらい、**静止画・GIF録画のどちらも問題が解消したことを確認できた**。要素選択(横に余白を持つリスト行など)の一連の不具合(横方向のクロップずれ、選択枠の写り込み)はこれで解消。tabCaptureの映像解像度を明示指定する対応が、GIF録画側の横方向クロップずれの実際の原因だったと考えられる(get UserMedia に解像度を指定しないと、Chrome側が実際のページサイズと無関係な解像度で映像を用意することがある、という当初の推測が実機検証で裏付けられた形)。
+
+### 2026-09-27 (続き: GIF録画のガクガク感を Worker への処理分離で改善)
+- ユーザーから改めて「GIF録画の画質(容量)は度外視で良いので、なめらかに録画したい(ガクガクするのが気になる)」との要望を受けて対応した。
+- **原因の再検討**: これまでも「早送りに見えるバグ」(delayの実測記録化)や「パレット再計算の間引き」「解像度上限(960px)による縮小」でなめらかさの改善を図ってきたが、いずれも quantize/applyPalette/`gif.writeFrame()` を**メインスレッド上で、フレームサンプリング(`setInterval` + `drawImage`)と同じスレッド**で同期的に実行する構造そのものは変えていなかった。特に `quantize()`(パレット再計算)は全ピクセルを見るため重く、実行される数フレームごとに一時的にメインスレッドを長くブロックする。ブロックしている間は次の `setInterval` のコールバックも実行されないため、その瞬間だけフレーム間隔が大きく開き、これが周期的な「カクつき」として体感されていたと考えられる(delayを実測して記録することで「再生速度が実時間からズレる」問題は解消していたが、「そもそも重い処理のせいでサンプリング自体が止まる」問題は解消していなかった)。
+- **対応**: GIFエンコード(quantize/applyPalette/`gif.writeFrame()`)を専用の Web Worker([offscreen/gif-worker.js](offscreen/gif-worker.js))に完全に分離した。
+  - [offscreen/offscreen.js](offscreen/offscreen.js) 側(メインスレッド)は、`setInterval` ごとに `drawImage` + `getImageData` でピクセルデータを取り込み、経過時間(delay)を実測した上で `postMessage`(`ArrayBuffer` を transfer、コピーではなくゼロコピー転送)で Worker に渡すだけになった。重いエンコード処理はメインスレッドの `setInterval` ループとは別スレッドで並行して進むため、エンコードがどれだけ時間がかかってもフレームサンプリングの間隔自体は乱れなくなる。
+  - Worker側はメッセージを受信順に(同期的に)処理するキューとして働くため、"frame" メッセージ群の後に送る "finish" メッセージは、それまでに投げたフレームがすべてエンコードし終わってから処理される。これにより録画停止時にフレームが取りこぼされることはない。
+  - **メモリ上限のガード**: Workerのエンコードがフレームサンプリングに追いつかない場合、送ったが未処理のフレーム(ピクセルデータそのもの、1フレームあたり数MB)が際限なく溜まるとタブがクラッシュしかねない。そのため未処理フレーム数(`pendingFrames`)を数え、`MAX_PENDING_FRAMES`(120)を超えている間はその回のフレーム取り込み自体をスキップするようにした。スキップした分の経過時間は次に実際に送るフレームの delay に正しく反映される(直前フレーム時刻 `lastFrameAt` の更新をスキップ時は行わない)ため、Workerの処理速度に対して録画の実効フレームレートが自動的に下がるだけで、GIFの再生速度が実時間からズレることはない。
+  - **なめらかさを最大化する方向でのパラメータ再調整**: エンコードの重さがサンプリング間隔に直接影響しなくなったため、目標フレームサンプリング間隔 `GIF_FRAME_INTERVAL_MS` を 60ms(目標約16.6fps)から 33ms(目標約30fps、tabCaptureの一般的な映像フレームレートに合わせた値)に短縮した。パレット再計算間隔 `GIF_PALETTE_REFRESH_INTERVAL` は、Worker側の処理コストを下げて実効スループットを上げるため 5→10 フレームに1回に緩めた(色の正確さより滑らかさを優先する既存方針の延長)。`GIF_MAX_FRAMES` は目標間隔短縮に合わせて、最大録画時間(約90秒)が変わらないよう 1500→2700 に比例して増やした。
+  - この変更により、GIFのファイルサイズは(フレーム数が増える分)これまでより大きくなる想定だが、ユーザーからの要望通り「容量は度外視でなめらかさ優先」の方針に合致する。
+  - manifest を 0.5.0 に更新(処理方式そのものを変える、まとまった変更のため minor バンプ)。
+  - **未検証**: このセッションも構文チェック(`node --check` 相当。`import.meta` を含むESMのため `vm.SourceTextModule` でのパース確認)のみで、実機での確認はできていない。特に、(1) 実際にガクガク感が改善したか、(2) Worker生成(`new Worker(new URL(...), { type: "module" })`)がChrome拡張機能のoffscreen document内で問題なく動作するか(offscreen.htmlの`<script type="module">`から呼ばれる前提だが、拡張機能のパッケージ化された `extension://` オリジンからのmodule worker生成は未検証)、(3) `MAX_PENDING_FRAMES` のガードが長時間録画時に発動して録画が破綻しないか、は実機での確認が必要。

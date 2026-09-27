@@ -1,10 +1,11 @@
 // Offscreen document: DOM/Canvas/MediaStream が必要な重い処理を一手に引き受ける。
 // - PNG: キャプチャ済み data URL のトリミング・タイル結合
-// - GIF: tabCapture の MediaStream からライブでフレームをサンプリングしてエンコード
+// - GIF: tabCapture の MediaStream からライブでフレームをサンプリングし、
+//   実際のエンコード(quantize/applyPalette/writeFrame)は gif-worker.js に委譲する
 // - 最終ファイルの chrome.downloads.download 呼び出し
 //
-// gifenc は PNG のみのフローには不要なので、動的 import で GIF 録画開始時にのみ
-// 読み込む(gifenc 側に問題があっても PNG 系の機能を道連れにしないため)。
+// gifenc(GIFエンコード)は gif-worker.js 内でのみ読み込む。理由は下記
+// startRecording() 手前のコメント、および gif-worker.js 冒頭のコメント参照。
 
 const LOG_PREFIX = "[offscreen]";
 function log(...args) {
@@ -15,25 +16,36 @@ function log(...args) {
 // (実質2fps程度が上限)より滑らかにするため、tabCaptureのライブストリームから
 // 直接サンプリングする。あくまで setInterval に渡す目標値であり、実際の間隔は
 // 下記 captureGifFrame() 内で計測して各フレームの delay に反映する(理由はそちら参照)。
-// 値は暫定。容量よりなめらかさを優先する方針で意図的に小さめにしている。
-const GIF_FRAME_INTERVAL_MS = 60;
-// 録画の暴走防止用の暫定上限(フレーム数)。目標間隔通りに進めば約90秒。
-const GIF_MAX_FRAMES = 1500;
-const GIF_PALETTE_SIZE = 256;
+// エンコードを gif-worker.js に切り出してメインスレッドの負荷を drawImage/getImageData
+// だけに減らせたため、以前の60ms(目標約16.6fps)から33ms(目標約30fps、tabCaptureの
+// 一般的な映像フレームレートに合わせた値)に短縮した。容量よりなめらかさを優先する方針。
+const GIF_FRAME_INTERVAL_MS = 33;
+// 録画の暴走防止用の暫定上限(フレーム数)。目標間隔通りに進めば約90秒
+// (GIF_FRAME_INTERVAL_MS短縮に合わせて、時間の上限が変わらないよう比例して増やした)。
+const GIF_MAX_FRAMES = 2700;
 // quantize()(パレット再計算)は全ピクセルを見るため重く、毎フレーム行うと
-// それ自体が実際のフレーム間隔を目標値より延ばしてしまう。数フレームに1回だけ
-// 再計算し、間のフレームは同じパレットを applyPalette() で使い回すことで
-// 実際の間隔を目標値に近づける(色の正確さより滑らかさを優先する方針)。
-const GIF_PALETTE_REFRESH_INTERVAL = 5;
+// それ自体がWorker側の処理時間を延ばし、エンコードがサンプリングに追いつかなくなる
+// 原因になる。数フレームに1回だけ再計算し、間のフレームは同じパレットを
+// applyPalette() で使い回すことで、Workerの実効スループットを上げる
+// (色の正確さより滑らかさを優先する方針)。
+const GIF_PALETTE_REFRESH_INTERVAL = 10;
 // getImageData/quantize/applyPalette は処理コストがピクセル数に比例するため、
 // フルページ(高dpr環境では実質4Kクラスの映像)をそのまま処理すると1フレームの
-// 処理時間が目標間隔を大きく超え、結果的に実際のフレームレートが低くガタガタした
-// 見た目になる(delayを実測記録するようにしても、そもそも実際に撮れるフレーム数が
-// 少なければなめらかにはならない)。そのため長辺がこの値を超える場合は、GIFに
-// 焼き込む前にこのサイズまで縮小してからエンコードする(画質より滑らかさを優先)。
+// エンコード時間が長くなり、Worker側のバックログ(下記MAX_PENDING_FRAMES参照)が
+// 溜まりやすくなる。そのため長辺がこの値を超える場合は、GIFに焼き込む前に
+// このサイズまで縮小してからエンコードする(画質より滑らかさを優先)。
 const GIF_MAX_DIMENSION = 960;
+// エンコード(Worker側)がフレームサンプリングに追いつかない場合、投げたフレームの
+// うちまだWorkerが処理していないものの数(バックログ)。これを無制限に溜めると、
+// 1フレームあたり数MB(例: 960x540のRGBAで約2MB)のピクセルデータが際限なく
+// メモリに積み上がり、長時間の録画でタブがクラッシュしかねない。そのため
+// バックログがこの値を超えている間はメインスレッド側の drawImage/getImageData 自体を
+// 一時的にスキップする(=実効フレームレートがWorkerの処理速度に合わせて自動的に
+// 下がる)。スキップした分の経過時間は次に実際に送ったフレームのdelayに正しく
+// 反映されるため(lastFrameAtの更新をスキップ時は行わない)、再生速度自体はズレない。
+const MAX_PENDING_FRAMES = 120;
 
-let recording = null; // { stream, video, canvas, ctx, gif, intervalId, frameCount, width, height }
+let recording = null; // { stream, video, canvas, ctx, worker, intervalId, frameCount, pendingFrames, width, height }
 
 // 重要: offscreen document には chrome.downloads が生えていない(呼ぶと
 // "Cannot read properties of undefined (reading 'download')" になる)。
@@ -157,9 +169,6 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
   }
 
   log("startRecording", { streamId, rect, viewportWidth, viewportHeight, dpr });
-  const { GIFEncoder, quantize, applyPalette } = await import(
-    "../vendor/gifenc/gifenc.esm.js"
-  );
 
   const videoConstraints = {
     mandatory: {
@@ -236,24 +245,53 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const gif = GIFEncoder();
+
+  // GIFエンコード(quantize/applyPalette/writeFrame)は専用Workerに完全に委譲する。
+  // 理由: これらはピクセル数に比例して重く、メインスレッド(フレームサンプリングと
+  // 同じスレッド)で同期的に行うと、重い処理が走っている間サンプリングの setInterval
+  // 自体が止まり、周期的なカクつきの原因になっていた(詳細は gif-worker.js 冒頭参照)。
+  const worker = new Worker(new URL("./gif-worker.js", import.meta.url), { type: "module" });
+  worker.onerror = (event) => {
+    console.error(LOG_PREFIX, "gif-worker error", event.message, event);
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      const onMessage = (event) => {
+        if (event.data?.type === "initDone") {
+          worker.removeEventListener("message", onMessage);
+          resolve();
+        }
+      };
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", reject, { once: true });
+      worker.postMessage({ type: "init", paletteRefreshInterval: GIF_PALETTE_REFRESH_INTERVAL });
+    });
+  } catch (err) {
+    worker.terminate();
+    stream.getTracks().forEach((t) => t.stop());
+    throw err;
+  }
 
   recording = {
     stream,
     video,
     canvas,
     ctx,
-    gif,
+    worker,
     crop,
     width,
     height,
-    frameCount: 0,
-    palette: null,
+    frameCount: 0, // メインスレッドが取り込んでWorkerに送ったフレーム数
+    pendingFrames: 0, // まだWorkerがエンコードし終えていないフレーム数(バックログ)
     // 各フレームのdelayを実測するための直前フレーム時刻(理由はcaptureGifFrame参照)。
     lastFrameAt: performance.now(),
-    quantize,
-    applyPalette,
   };
+
+  worker.addEventListener("message", (event) => {
+    if (event.data?.type === "frameDone" && recording) {
+      recording.pendingFrames = Math.max(0, recording.pendingFrames - 1);
+    }
+  });
 
   recording.intervalId = setInterval(() => {
     captureGifFrame();
@@ -279,7 +317,17 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
 }
 
 function captureGifFrame() {
-  const { ctx, video, gif, width, height, crop } = recording;
+  // Workerのエンコードがサンプリングに追いつかず、投げたフレームが溜まりすぎている
+  // 場合は、メモリを無制限に消費しないようこのティックの取り込み自体をスキップする。
+  // lastFrameAt を更新しないため、次に実際に送るフレームのdelayにはスキップした分の
+  // 経過時間が正しく含まれ、GIFの再生速度は実時間からズレない(録画実効fpsが
+  // Workerの処理速度に自動的に合わせて下がるだけ)。
+  if (recording.pendingFrames >= MAX_PENDING_FRAMES) {
+    log("encode backlog too large, skipping this frame", recording.pendingFrames);
+    return;
+  }
+
+  const { ctx, video, width, height, crop, worker } = recording;
   if (crop) {
     ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, width, height);
   } else {
@@ -287,26 +335,25 @@ function captureGifFrame() {
   }
   const imageData = ctx.getImageData(0, 0, width, height);
 
-  // パレットは毎フレームではなく数フレームに1回だけ再計算する(理由は定数定義部を参照)。
-  if (!recording.palette || recording.frameCount % GIF_PALETTE_REFRESH_INTERVAL === 0) {
-    recording.palette = recording.quantize(imageData.data, GIF_PALETTE_SIZE);
-  }
-  const index = recording.applyPalette(imageData.data, recording.palette);
-
   // delay は GIF_FRAME_INTERVAL_MS 固定ではなく実測の経過時間を使う。
-  // quantize等の処理が目標間隔を超えて実際の間隔が伸びた場合でも固定値のまま
-  // 記録すると、GIF再生時間が実際の録画時間より短くなり「早送り」に見える
-  // バグがあったため(このバグの詳細はREADMEの実装ログ参照)。
+  // 処理が目標間隔を超えて実際の間隔が伸びた場合でも固定値のまま記録すると、
+  // GIF再生時間が実際の録画時間より短くなり「早送り」に見えるバグがあったため
+  // (このバグの詳細はREADMEの実装ログ参照)。
   const now = performance.now();
   const elapsedMs = now - recording.lastFrameAt;
   recording.lastFrameAt = now;
 
-  gif.writeFrame(index, width, height, {
-    palette: recording.palette,
-    delay: Math.max(20, Math.round(elapsedMs)),
-  });
+  recording.pendingFrames++;
+  // imageData.data.buffer は transfer するとこのスレッドでは使えなくなるが、
+  // 次のティックで getImageData が新しいバッファを返すので問題ない(コピー不要)。
+  worker.postMessage(
+    { type: "frame", buffer: imageData.data.buffer, width, height, delay: Math.max(20, Math.round(elapsedMs)) },
+    [imageData.data.buffer]
+  );
   recording.frameCount++;
-  if (recording.frameCount % 20 === 0) log("captured", recording.frameCount, "frames so far");
+  if (recording.frameCount % 20 === 0) {
+    log("captured", recording.frameCount, "frames so far (encode backlog:", recording.pendingFrames, ")");
+  }
 }
 
 async function finishRecording() {
@@ -317,15 +364,29 @@ async function finishRecording() {
   clearInterval(recording.intervalId);
   recording.stream.getTracks().forEach((t) => t.stop());
 
-  const { gif, frameCount } = recording;
+  const { worker, frameCount } = recording;
+  log("finishRecording, frameCount=", frameCount, "encode backlog=", recording.pendingFrames);
+
+  // finish を送る時点までにキューイングした "frame" メッセージは、Worker内で
+  // メッセージ到着順に同期処理されるため、Workerがそれらをすべて処理し終えてから
+  // "done" が返ってくる(=バックログがあっても取りこぼされない)。
+  const bytes = await new Promise((resolve, reject) => {
+    const onMessage = (event) => {
+      if (event.data?.type === "done") {
+        worker.removeEventListener("message", onMessage);
+        resolve(event.data.bytes);
+      }
+    };
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", reject, { once: true });
+    worker.postMessage({ type: "finish" });
+  });
+  worker.terminate();
   recording = null;
-  log("finishRecording, frameCount=", frameCount);
 
   if (frameCount === 0) {
     return { ok: false, error: "フレームが取得できませんでした" };
   }
-  gif.finish();
-  const bytes = gif.bytes();
   log("gif encoded", bytes.length, "bytes");
   const blob = new Blob([bytes], { type: "image/gif" });
   return { ok: true, blob, frameCount };
