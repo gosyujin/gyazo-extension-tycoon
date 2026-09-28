@@ -16,13 +16,24 @@ function log(...args) {
 // (実質2fps程度が上限)より滑らかにするため、tabCaptureのライブストリームから
 // 直接サンプリングする。あくまで setInterval に渡す目標値であり、実際の間隔は
 // 下記 captureGifFrame() 内で計測して各フレームの delay に反映する(理由はそちら参照)。
-// エンコードを gif-worker.js に切り出してメインスレッドの負荷を drawImage/getImageData
-// だけに減らせたため、以前の60ms(目標約16.6fps)から33ms(目標約30fps、tabCaptureの
-// 一般的な映像フレームレートに合わせた値)に短縮した。容量よりなめらかさを優先する方針。
-const GIF_FRAME_INTERVAL_MS = 33;
-// 録画の暴走防止用の暫定上限(フレーム数)。目標間隔通りに進めば約90秒
-// (GIF_FRAME_INTERVAL_MS短縮に合わせて、時間の上限が変わらないよう比例して増やした)。
-const GIF_MAX_FRAMES = 2700;
+// fpsはユーザーがpopup/ツールバーの入力欄で録画開始のたびに指定できる(1〜60、
+// デフォルト30)。ファイルサイズの主な要因はフレーム数(≒fps)なので、フレーム差分
+// エンコード(gif-worker.js参照)を入れた後も、体感の滑らかさとサイズのバランスを
+// 手元で探れるようにする狙い。解像度上限や録画時間上限はfpsを変えても変化しない。
+const DEFAULT_GIF_FPS = 30;
+const MIN_GIF_FPS = 1;
+const MAX_GIF_FPS = 60;
+// 録画の暴走防止用の暫定上限(録画時間、ms)。以前はフレーム数で上限を設けていたが、
+// fpsをユーザーが変更できるようになったため、fpsに関わらず上限時間が一定になるよう
+// 経過時間ベースの判定に変更した。
+const GIF_MAX_DURATION_MS = 90_000;
+
+// fps入力値(文字列/数値、未指定や不正値もありうる)を 1〜60 の整数に丸める。
+function resolveFps(fps) {
+  const n = Number(fps);
+  if (!Number.isFinite(n)) return DEFAULT_GIF_FPS;
+  return Math.min(MAX_GIF_FPS, Math.max(MIN_GIF_FPS, Math.round(n)));
+}
 // quantize()(パレット再計算)は全ピクセルを見るため重く、毎フレーム行うと
 // それ自体がWorker側の処理時間を延ばし、エンコードがサンプリングに追いつかなくなる
 // 原因になる。数フレームに1回だけ再計算し、間のフレームは同じパレットを
@@ -165,13 +176,15 @@ async function processTiles({ tiles, region, dpr, filename }) {
 // videoWidth/videoHeight を使った実測比率でのクロップ計算(上記)は保険として
 // 残す(要求した解像度が何らかの理由でそのまま通らなかった場合でも、実際の
 // 映像サイズを基準にする限り破綻しないため)。
-async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr, lightweight }) {
+async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr, lightweight, fps }) {
   if (recording) {
     log("startRecording called while already recording");
     return { ok: false, error: "既に録画中です" };
   }
 
-  log("startRecording", { streamId, rect, viewportWidth, viewportHeight, dpr });
+  const resolvedFps = resolveFps(fps);
+  const frameIntervalMs = Math.round(1000 / resolvedFps);
+  log("startRecording", { streamId, rect, viewportWidth, viewportHeight, dpr, fps, resolvedFps });
 
   const videoConstraints = {
     mandatory: {
@@ -288,6 +301,7 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
     crop,
     width,
     height,
+    frameIntervalMs,
     frameCount: 0, // メインスレッドが取り込んでWorkerに送ったフレーム数
     pendingFrames: 0, // まだWorkerがエンコードし終えていないフレーム数(バックログ)
     // 各フレームのdelayを実測するための直前フレーム時刻(理由はcaptureGifFrame参照)。
@@ -308,8 +322,8 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
 
   recording.intervalId = setInterval(() => {
     captureGifFrame();
-    if (recording && recording.frameCount >= GIF_MAX_FRAMES) {
-      log("max frames reached, auto-stopping");
+    if (recording && performance.now() - recording.startedAt >= GIF_MAX_DURATION_MS) {
+      log("max duration reached, auto-stopping");
       finishRecording().then((result) => {
         // Blob は chrome.runtime.sendMessage で JSON シリアライズできないため
         // 必ず URL 文字列に変換してから送る。
@@ -330,7 +344,7 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
         }
       });
     }
-  }, GIF_FRAME_INTERVAL_MS);
+  }, frameIntervalMs);
 
   return { ok: true };
 }
@@ -354,7 +368,7 @@ function captureGifFrame() {
   }
   const imageData = ctx.getImageData(0, 0, width, height);
 
-  // delay は GIF_FRAME_INTERVAL_MS 固定ではなく実測の経過時間を使う。
+  // delay は目標間隔(frameIntervalMs)固定ではなく実測の経過時間を使う。
   // 処理が目標間隔を超えて実際の間隔が伸びた場合でも固定値のまま記録すると、
   // GIF再生時間が実際の録画時間より短くなり「早送り」に見えるバグがあったため
   // (このバグの詳細はREADMEの実装ログ参照)。

@@ -33,6 +33,14 @@
   // cleanupOverlay からも明示的に止められるようモジュールスコープに置く。
   let toolbarPollTimer = null;
 
+  // fps入力欄は数値のみ・1〜60に丸める(popup/popup.jsと同じロジック。ビルドツールを
+  // 使わない方針のため、共有モジュール化はせずそれぞれのファイルに持たせている)。
+  function clampFps(value) {
+    const n = parseInt(value, 10);
+    if (!Number.isFinite(n)) return 30;
+    return Math.min(60, Math.max(1, n));
+  }
+
   function cleanupOverlay() {
     overlayEl?.remove();
     selectionBoxEl?.remove();
@@ -119,6 +127,28 @@
     lightweightLabel.appendChild(document.createTextNode("軽量化"));
     toolbarEl.appendChild(lightweightLabel);
 
+    // フレームサンプリングの目標fps(1〜60、デフォルト30)。値を変えながら
+    // 「なめらかさ」と「ファイルサイズ」の感触を手元で確かめられるようにするための
+    // 入力欄(popup側にも同じものがある)。軽量化チェックボックスと同様、録画中は
+    // 前提が変わるのを防ぐため disabled にする。
+    const fpsLabel = document.createElement("label");
+    fpsLabel.className = "gyazo-ext-tycoon-toolbar-fps";
+    const fpsInput = document.createElement("input");
+    fpsInput.type = "number";
+    fpsInput.min = "1";
+    fpsInput.max = "60";
+    fpsInput.step = "1";
+    fpsInput.value = "30";
+    fpsInput.addEventListener("input", () => {
+      fpsInput.value = fpsInput.value.replace(/[^0-9]/g, "");
+    });
+    fpsInput.addEventListener("change", () => {
+      fpsInput.value = String(clampFps(fpsInput.value));
+    });
+    fpsLabel.appendChild(fpsInput);
+    fpsLabel.appendChild(document.createTextNode("fps"));
+    toolbarEl.appendChild(fpsLabel);
+
     // 録画開始からの「nフレーム / x秒」表示。画像保存(1回きりの単発処理)には
     // 付けない(録画のように継続する状態ではないため表示する意味が薄い)。
     // 録画していない間も「0フレーム / 0.0秒」を表示しておき、録画開始/終了の
@@ -149,6 +179,7 @@
       const isRecording = !!state?.isRecording;
       recordBtn.textContent = isRecording ? "録画停止" : "録画開始";
       lightweightCheckbox.disabled = isRecording;
+      fpsInput.disabled = isRecording;
       counterEl.textContent = formatCounter(state);
       if (isRecording) {
         if (!toolbarPollTimer) {
@@ -175,7 +206,10 @@
             if (outlineEl) outlineEl.style.visibility = "";
           } else {
             if (outlineEl) outlineEl.style.visibility = "hidden";
-            const result = await onStartRecording({ lightweight: lightweightCheckbox.checked });
+            const result = await onStartRecording({
+              lightweight: lightweightCheckbox.checked,
+              fps: clampFps(fpsInput.value),
+            });
             if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
           }
         } catch (err) {
@@ -288,7 +322,7 @@
         log("CROP_SELECTION_READY response", res);
       },
       canRecord: true,
-      onStartRecording: ({ lightweight } = {}) =>
+      onStartRecording: ({ lightweight, fps } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect,
@@ -296,6 +330,7 @@
           viewportHeight,
           dpr: window.devicePixelRatio || 1,
           lightweight,
+          fps,
         }),
       outlineEl: selectionBoxEl,
     });
@@ -501,7 +536,7 @@
       // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
       // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ録画可能にする。
       recordDisabledReason: "選択した要素は画面からはみ出しているため録画できません(画像保存は可能です)",
-      onStartRecording: ({ lightweight } = {}) =>
+      onStartRecording: ({ lightweight, fps } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect: rectPayload,
@@ -509,6 +544,7 @@
           viewportHeight,
           dpr: window.devicePixelRatio || 1,
           lightweight,
+          fps,
         }),
       outlineEl: highlightEl,
     });

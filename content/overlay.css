@@ -84,3 +84,24 @@
   white-space: nowrap;
   cursor: pointer;
 }
+
+.gyazo-ext-tycoon-toolbar-fps {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.gyazo-ext-tycoon-toolbar-fps input {
+  width: 40px;
+  padding: 2px 4px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.gyazo-ext-tycoon-toolbar-fps input:disabled {
+  opacity: 0.45;
+}

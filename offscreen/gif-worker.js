@@ -23,6 +23,18 @@ const LIGHTWEIGHT_MIN_DIMENSION = 240;
 const LIGHTWEIGHT_SCALE_STEPS = [0.75, 0.5, 0.35];
 const LIGHTWEIGHT_COLOR_STEPS = [128, 64, 32];
 
+// ストリーミング出力するGIFへ書き込むフレーム差分エンコード用の設定。
+// GIFのパレットは256色までだが、差分の「変化なし」を表す透過インデックス用に
+// 1つ空けておく必要があるため、quantize()は255色までに抑える。
+const MAX_PALETTE_COLORS = 255;
+const TRANSPARENT_INDEX = 255;
+// 前フレームとの差分(RGB各チャンネルの絶対差の合計)がこの値以下なら「変化なし」
+// とみなして透過にする。tabCaptureの映像はコーデックを経由しないため基本的に
+// ピクセル完全一致するはずだが、GPU合成の端数処理などによる微小な揺れを吸収する
+// ための遊び(暫定値)。大きくしすぎると実際の変化を取りこぼして残像的に見える
+// リスクがあるため、あくまで「人の目にわからない程度」の小さい値にとどめる。
+const FRAME_DIFF_THRESHOLD = 24;
+
 let GIFEncoder;
 let quantize;
 let applyPalette;
@@ -31,6 +43,9 @@ let gif = null;
 let palette = null;
 let frameCount = 0;
 let paletteRefreshInterval = 5;
+// 直前フレームの生RGBA(差分判定用)。postMessageで受け取ったバッファは
+// このWorkerが所有権を持ち他から参照されないため、コピーせず参照を保持するだけでよい。
+let prevRawData = null;
 // 「軽量化」がオンのときだけ、再エンコード用に各フレームの量子化済みデータ
 // (index + そのフレームが使ったpalette + delay)を保持する。RGBAそのものより
 // 1/4のメモリで済む(量子化はどのみち通常エンコードの過程で行っているため、
@@ -57,6 +72,7 @@ self.onmessage = async (event) => {
       paletteRefreshInterval = msg.paletteRefreshInterval || 5;
       retainFrames = !!msg.retainFrames;
       retained = [];
+      prevRawData = null;
       self.postMessage({ type: "initDone" });
       break;
     }
@@ -66,15 +82,45 @@ self.onmessage = async (event) => {
       // パレットは毎フレームではなく数フレームに1回だけ再計算する(このWorker内で
       // 完結するため、メインスレッドのフレームサンプリングには一切影響しない)。
       if (!palette || frameCount % paletteRefreshInterval === 0) {
-        palette = quantize(data, 256);
+        palette = quantize(data, MAX_PALETTE_COLORS);
       }
+      // retainFrames(「軽量化」用の保持)は常にこの「真の」量子化結果を使う。
+      // 下の差分エンコードは、あくまでストリーミング出力するGIFへの書き込み方法を
+      // 変えるだけで、retained側(軽量化の再エンコード用データ)には影響しない。
       const index = applyPalette(data, palette);
-      gif.writeFrame(index, width, height, { palette, delay });
       if (retainFrames) {
         retained.push({ index, palette, delay });
         frameWidth = width;
         frameHeight = height;
       }
+
+      // 前フレームとほぼ変化していないピクセルは透過色にして書き込む。
+      // dispose:1("そのまま残す")と組み合わせると、変化していない領域はデコード時に
+      // 前フレームの絵がそのまま透けて見える(=実質的にそのピクセルは再描画されない)。
+      // GIFのLZW圧縮は同じ値が連続するほど効くため、静止部分が多い画面録画では
+      // これだけでファイルサイズが大きく下がる。解像度・フレーム数・実際に変化した
+      // ピクセルの色はどれも一切劣化させない(詳細はREADME参照)。
+      let writeIndex = index;
+      const writeOptions = { palette, delay };
+      if (prevRawData) {
+        writeIndex = new Uint8Array(index.length);
+        for (let i = 0, o = 0; i < index.length; i++, o += 4) {
+          const diff =
+            Math.abs(data[o] - prevRawData[o]) +
+            Math.abs(data[o + 1] - prevRawData[o + 1]) +
+            Math.abs(data[o + 2] - prevRawData[o + 2]);
+          writeIndex[i] = diff <= FRAME_DIFF_THRESHOLD ? TRANSPARENT_INDEX : index[i];
+        }
+        writeOptions.transparent = true;
+        writeOptions.transparentIndex = TRANSPARENT_INDEX;
+        writeOptions.dispose = 1;
+      }
+      gif.writeFrame(writeIndex, width, height, writeOptions);
+      // 次フレームの差分判定用に、量子化前の生RGBAを保持しておく(量子化後の色を
+      // 基準にすると、パレット再計算のタイミングによって差分が実際の見た目の変化と
+      // ズレるため)。
+      prevRawData = data;
+
       frameCount++;
       self.postMessage({ type: "frameDone", frameCount });
       break;
@@ -108,6 +154,7 @@ self.onmessage = async (event) => {
       retained = [];
       frameWidth = 0;
       frameHeight = 0;
+      prevRawData = null;
       break;
     }
     default:

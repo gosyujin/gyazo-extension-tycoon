@@ -147,11 +147,11 @@ async function startFullpageCaptureOnActiveTab() {
   await chrome.tabs.sendMessage(tab.id, { type: "START_FULLPAGE_CAPTURE" });
 }
 
-async function startRecordingVisiblePage({ lightweight } = {}) {
+async function startRecordingVisiblePage({ lightweight, fps } = {}) {
   const tab = await getActiveTab();
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
   log("got tabCapture streamId, starting offscreen recording (visible page)");
-  const result = await sendToOffscreen({ type: "START_RECORDING", streamId, lightweight });
+  const result = await sendToOffscreen({ type: "START_RECORDING", streamId, lightweight, fps });
   if (result?.ok) {
     setRecordingBadge(true);
   } else {
@@ -328,7 +328,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // 表示中のページ(タブ全体)をそのまま録画開始する。
       case "START_RECORDING_VISIBLE": {
-        sendResponse(await startRecordingVisiblePage({ lightweight: message.lightweight }));
+        sendResponse(await startRecordingVisiblePage({ lightweight: message.lightweight, fps: message.fps }));
         break;
       }
 
@@ -348,6 +348,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           viewportHeight: message.viewportHeight,
           dpr: message.dpr,
           lightweight: message.lightweight,
+          fps: message.fps,
         });
         if (result?.ok) {
           setRecordingBadge(true);

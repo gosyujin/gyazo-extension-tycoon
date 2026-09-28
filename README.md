@@ -54,7 +54,7 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
 
 ## 既知の制限・今後調整が必要な暫定値
 
-- `GIF_FRAME_INTERVAL_MS`(GIFフレームサンプリングの目標間隔、現在 33ms ≒ 30fps)、`GIF_PALETTE_REFRESH_INTERVAL`(パレット再計算間隔、現在 10フレームに1回)、`GIF_MAX_DIMENSION`(エンコード解像度の長辺上限、現在 960px。これを超える場合は縮小してからエンコードする)、`GIF_MAX_FRAMES`(暴走防止用の最大フレーム数、現在 2700 = 目標間隔通りなら約90秒)、`MAX_PENDING_FRAMES`(エンコードWorkerへの未処理フレームのバックログ上限、現在 120)は容量よりなめらかさを優先する方針の暫定値。画質・ファイルサイズ・CPU負荷を見ながら今後調整する([offscreen/offscreen.js](offscreen/offscreen.js) 冒頭の定数)。GIFエンコード自体(quantize/applyPalette/writeFrame)は [offscreen/gif-worker.js](offscreen/gif-worker.js) という専用Workerに分離されており、メインスレッド側はフレーム取り込み(drawImage/getImageData)のみを担当する(経緯は下記「実装ログ」参照)。
+- GIFフレームサンプリングの目標fpsは popup / 矩形・要素選択ツールバーの入力欄(1〜60、デフォルト30)でユーザーが録画開始時に指定できる([offscreen/offscreen.js](offscreen/offscreen.js) の `resolveFps()`)。`chrome.commands` のキーボードショートカット(`record-visible`)経由のみ入力UIが無くデフォルト30fps固定。`GIF_PALETTE_REFRESH_INTERVAL`(パレット再計算間隔、現在 10フレームに1回)、`GIF_MAX_DIMENSION`(エンコード解像度の長辺上限、現在 960px。これを超える場合は縮小してからエンコードする)、`GIF_MAX_DURATION_MS`(暴走防止用の最大録画時間、現在 90秒。fpsに関わらず一定)、`MAX_PENDING_FRAMES`(エンコードWorkerへの未処理フレームのバックログ上限、現在 120)は容量よりなめらかさを優先する方針の暫定値。画質・ファイルサイズ・CPU負荷を見ながら今後調整する([offscreen/offscreen.js](offscreen/offscreen.js) 冒頭の定数)。GIFエンコード自体(quantize/applyPalette/writeFrame)は [offscreen/gif-worker.js](offscreen/gif-worker.js) という専用Workerに分離されており、メインスレッド側はフレーム取り込み(drawImage/getImageData)のみを担当する(経緯は下記「実装ログ」参照)。フレーム差分エンコード(前フレームと変化のないピクセルを透過にしてファイルサイズを削減する仕組み)の `FRAME_DIFF_THRESHOLD`(現在24)も同様に暫定値([offscreen/gif-worker.js](offscreen/gif-worker.js) 冒頭の定数、詳細は下記「実装ログ」2026-09-28参照)。
 - GIF録画の矩形選択・要素選択は、選択した範囲を毎フレーム切り出す都合上、ビューポートに収まる範囲のみ対応。ビューポートより大きい/画面外にはみ出す要素は録画できない(PNGのフルページ撮影のようなスクロールしながらのタイル結合は、録画中にスクロール位置を動かすと録画内容自体が乱れるため未対応)。
 - フルページ/大きい要素のタイル撮影は、スクロール後に固定ディレイ(`SCROLL_SETTLE_MS` = 300ms)を待つだけの素朴な実装。`position: fixed/sticky` 要素がタイルごとに重複して写り込む、遅延読み込み画像に対応できない、といった既知の制限がある。
 - アイコンは仮の単色プレースホルダー(`icons/`、`vendor` 同様に本物のデザインは未着手)。
@@ -249,3 +249,17 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
 - **対応**: `flex-wrap: nowrap` に変更し `max-width` を外した(`white-space: nowrap` も追加)。`position: fixed` な `flex` コンテナは内容に応じて幅が決まる(shrink-to-fit)ため、折り返しを禁止すれば常に1行に収まる。また、要素の並び順をユーザーが書いた通り「画像保存・録画開始・軽量化チェックボックス・カウンター」になるよう [content/content-script.js](content/content-script.js) の `showActionToolbar()` 内での `appendChild` 順を変更した(以前はカウンターを軽量化チェックボックスより先に追加していた)。
 - **未検証**: 構文チェックのみ。実機で1行に収まること、選択範囲が画面端にある場合でもツールバーが画面外にはみ出さないこと(`positionToolbar()` は `el.offsetWidth` を見て位置を調整する既存ロジックのままなので大きな影響はない想定だが未確認)の確認が必要。
 - manifest を 0.6.2 に更新(見た目のみの小さい修正のため patch バンプ)。
+
+### 2026-09-28 (続き: GIFのファイルサイズ対策 — フレーム差分エンコード / fps入力欄の追加)
+- ユーザーから「GIFのファイルサイズ問題(960x540数秒で20〜30MB、軽量化すると330x180まで小さくなってしまう)について、サイズ・フレーム間引き・画質のうちどれも大きく犠牲にしたくない」という相談を受け、検討の結果2つの対応をした。
+  - **フレーム差分(dirty-rectangle風)エンコード**: 画面録画は前フレームとの変化が小さい(カーソル移動や一部UIの変化のみ)ことが多く、GIFが重い最大の要因は「各フレームを毎回全面ぶん独立にLZW圧縮していること」だった。[offscreen/gif-worker.js](offscreen/gif-worker.js) に、直前フレームの生RGBAを保持しておき(`prevRawData`)、各ピクセルのRGB差分合計が `FRAME_DIFF_THRESHOLD`(=24、暫定値)以下なら「変化なし」とみなして透過色(`TRANSPARENT_INDEX`=255)で書き込むようにした。GIFの `dispose: 1`(そのまま残す)と組み合わせることで、変化していない領域はデコード時に前フレームの絵がそのまま透けて見える(=実質的に再描画されない)。GIFのLZW圧縮は同じ値が連続するほど効くため、静止部分の多い画面録画ではこれだけでファイルサイズが大きく下がることを期待している。
+    - 透過色用に1インデックス空ける必要があるため、`quantize()` に渡す色数を256→255(`MAX_PALETTE_COLORS`)に変更した(実質的な色数の劣化は無視できるレベル)。
+    - 差分判定は量子化後の色ではなく量子化前の生RGBAどうしで行う(パレット再計算のタイミング(`GIF_PALETTE_REFRESH_INTERVAL`)によって量子化後の色が変わるため、それを基準にすると実際の見た目の変化とズレる)。
+    - **注意**: 使用しているgifenc(vendor/gifenc)のこのビルドは、`writeFrame()` に矩形の左上座標(x/y)を渡すAPIを持っておらず、すべてのフレームは常にキャンバス全体のサイズで(0,0)から書き込まれる。そのため「変化があった領域だけを切り出して小さく書き込む」という狭義のdirty-rectangle(部分矩形)化はできず、あくまで「フレーム全体は書きつつ、変化のないピクセルを透過にしてLZW圧縮に任せる」方式にとどまる。それでも用途(画面録画・UI操作)には十分効果があるはずという判断。
+    - この差分化は常時有効(オプション化していない)。「軽量化」チェックボックス用に保持する `retained`(index+palette)は、差分化の影響を受けない元の(全ピクセル分の)量子化結果をそのまま使うようにしており、軽量化の再エンコードロジック自体には変更を加えていない。
+  - **fps入力欄の追加**: ユーザーが「fpsを下げて体感を確かめたい」とのことだったため、固定値だった `GIF_FRAME_INTERVAL_MS`(旧33ms固定)をやめ、popup([popup/popup.html](popup/popup.html))・矩形/要素選択ツールバー([content/content-script.js](content/content-script.js))の両方に数値入力欄(1〜60、デフォルト30、それ以外の文字は入力時に除去し、確定時に範囲外なら丸める)を追加し、録画開始時に指定できるようにした。「軽量化」チェックボックスと同様、録画中は変更できないよう disabled にする。
+    - popup → background → offscreen の経路で `fps` を引き回し、[offscreen/offscreen.js](offscreen/offscreen.js) の `startRecording()` で `resolveFps()` により1〜60の整数に丸めてから `Math.round(1000 / fps)` でフレーム間隔(ms)を計算するようにした。
+    - 暴走防止の録画時間上限は、以前はフレーム数(`GIF_MAX_FRAMES`=2700、33ms固定を前提に約90秒相当として設定した値)で判定していたが、fpsが可変になったためこの前提が崩れる。経過時間ベースの判定(`GIF_MAX_DURATION_MS`=90秒)に置き換え、fpsに関わらず録画できる最大時間が一定になるようにした。
+    - `chrome.commands`(キーボードショートカットの `record-visible`)経由の開始にはfps入力のUIが無いため、「軽量化」と同様デフォルト値(30fps)固定とした(既知の制限として残す)。
+  - **未検証**: 引き続き構文チェック(`node --check` / ESM部分は `node --input-type=module --check`)のみで、実機のChromeでの動作確認はできていない。特に、①フレーム差分エンコードで実際にファイルサイズがどの程度下がるか(かつ画質・なめらかさに体感できる劣化がないか)、②`FRAME_DIFF_THRESHOLD`(=24)が動きの多いコンテンツ(動画再生など)で妥当か(小さすぎると効果が薄く、大きすぎると残像的に見えるリスクがある)、③fps入力欄が popup・ツールバーの両方で正しく動作し、指定したfpsで録画されるか、は実機での確認・調整が必要。
+- manifest を 0.7.0 に更新(まとまった機能追加のため minor バンプ)。
