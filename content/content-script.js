@@ -48,6 +48,32 @@
     return Math.min(255, Math.max(0, n));
   }
 
+  // fps・差分しきい値・サイズは「最後に録画開始した時の値」を chrome.storage.local に
+  // 保存し、次回ツールバー表示時のデフォルト値として復元する(popup/popup.jsと同じ
+  // ロジック。共有モジュール化はせずそれぞれのファイルに持たせている)。
+  const GIF_SETTINGS_STORAGE_KEY = "gifSettings";
+
+  async function loadSavedGifSettings() {
+    try {
+      const stored = await chrome.storage.local.get(GIF_SETTINGS_STORAGE_KEY);
+      const saved = stored?.[GIF_SETTINGS_STORAGE_KEY] ?? {};
+      return {
+        fps: clampFps(saved.fps),
+        diffThreshold: clampDiffThreshold(saved.diffThreshold),
+        size: ["large", "medium", "small"].includes(saved.size) ? saved.size : "large",
+      };
+    } catch (err) {
+      console.error(LOG_PREFIX, "failed to load saved GIF settings", err);
+      return { fps: 30, diffThreshold: 24, size: "large" };
+    }
+  }
+
+  function saveGifSettings(settings) {
+    chrome.storage.local.set({ [GIF_SETTINGS_STORAGE_KEY]: settings }).catch((err) => {
+      console.error(LOG_PREFIX, "failed to save GIF settings", err);
+    });
+  }
+
   function cleanupOverlay() {
     overlayEl?.remove();
     selectionBoxEl?.remove();
@@ -201,6 +227,14 @@
     sizeLabel.appendChild(sizeSelect);
     toolbarEl.appendChild(sizeLabel);
 
+    // 表示直後に、前回録画開始時の値を復元する(非同期のため一瞬デフォルト値が
+    // 見えるが、ユーザーが操作するまでのごく短い時間なので許容する)。
+    loadSavedGifSettings().then((settings) => {
+      fpsInput.value = String(settings.fps);
+      diffThresholdInput.value = String(settings.diffThreshold);
+      sizeSelect.value = settings.size;
+    });
+
     // 録画開始からの「nフレーム / x秒」表示。画像保存(1回きりの単発処理)には
     // 付けない(録画のように継続する状態ではないため表示する意味が薄い)。
     // 録画していない間も「0フレーム / 0.0秒」を表示しておき、録画開始/終了の
@@ -260,11 +294,15 @@
             if (outlineEl) outlineEl.style.visibility = "";
           } else {
             if (outlineEl) outlineEl.style.visibility = "hidden";
-            const result = await onStartRecording({
-              lightweight: lightweightCheckbox.checked,
+            const gifSettings = {
               fps: clampFps(fpsInput.value),
               diffThreshold: clampDiffThreshold(diffThresholdInput.value),
               size: sizeSelect.value,
+            };
+            saveGifSettings(gifSettings);
+            const result = await onStartRecording({
+              lightweight: lightweightCheckbox.checked,
+              ...gifSettings,
             });
             if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
           }

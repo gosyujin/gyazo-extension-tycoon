@@ -34,6 +34,32 @@ inputDiffThreshold.addEventListener("change", () => {
   inputDiffThreshold.value = String(clampDiffThreshold(inputDiffThreshold.value));
 });
 
+// fps・差分しきい値・サイズは「最後に録画開始した時の値」を chrome.storage.local に
+// 保存し、次回 popup を開いたときのデフォルト値として復元する(content-script.js と
+// 同じロジック。共有モジュール化はせずそれぞれのファイルに持たせている)。
+const GIF_SETTINGS_STORAGE_KEY = "gifSettings";
+
+async function loadSavedGifSettings() {
+  try {
+    const stored = await chrome.storage.local.get(GIF_SETTINGS_STORAGE_KEY);
+    const saved = stored?.[GIF_SETTINGS_STORAGE_KEY] ?? {};
+    return {
+      fps: clampFps(saved.fps),
+      diffThreshold: clampDiffThreshold(saved.diffThreshold),
+      size: ["large", "medium", "small"].includes(saved.size) ? saved.size : "large",
+    };
+  } catch (err) {
+    console.error("failed to load saved GIF settings", err);
+    return { fps: 30, diffThreshold: 24, size: "large" };
+  }
+}
+
+function saveGifSettings(settings) {
+  chrome.storage.local.set({ [GIF_SETTINGS_STORAGE_KEY]: settings }).catch((err) => {
+    console.error("failed to save GIF settings", err);
+  });
+}
+
 function showMessage(text) {
   messageEl.textContent = text;
 }
@@ -112,11 +138,15 @@ function renderRecordingState(state) {
 
 btnRecordVisible.addEventListener("click", async () => {
   btnRecordVisible.disabled = true;
-  const response = await send("START_RECORDING_VISIBLE", {
-    lightweight: chkLightweight.checked,
+  const gifSettings = {
     fps: clampFps(inputFps.value),
     diffThreshold: clampDiffThreshold(inputDiffThreshold.value),
     size: selectSize.value,
+  };
+  saveGifSettings(gifSettings);
+  const response = await send("START_RECORDING_VISIBLE", {
+    lightweight: chkLightweight.checked,
+    ...gifSettings,
   });
   if (response?.recordingState) renderRecordingState(response.recordingState);
 });
@@ -136,6 +166,12 @@ document.getElementById("btn-shortcuts").addEventListener("click", () => {
 });
 
 (async () => {
-  const state = await send("GET_RECORDING_STATE");
+  const [state, savedSettings] = await Promise.all([
+    send("GET_RECORDING_STATE"),
+    loadSavedGifSettings(),
+  ]);
+  inputFps.value = String(savedSettings.fps);
+  inputDiffThreshold.value = String(savedSettings.diffThreshold);
+  selectSize.value = savedSettings.size;
   renderRecordingState(state);
 })();
