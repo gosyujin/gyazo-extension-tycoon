@@ -60,7 +60,15 @@ const GIF_PALETTE_REFRESH_INTERVAL = 10;
 // エンコード時間が長くなり、Worker側のバックログ(下記MAX_PENDING_FRAMES参照)が
 // 溜まりやすくなる。そのため長辺がこの値を超える場合は、GIFに焼き込む前に
 // このサイズまで縮小してからエンコードする(画質より滑らかさを優先)。
-const GIF_MAX_DIMENSION = 960;
+// 自由入力ではなくpopup/ツールバーのドロップダウン(大/中/小)から選ぶ方式にした。
+// fps・差分しきい値と違い、解像度は無段階に調整したいパラメータというよりは
+// 「見やすさ」と「サイズ」のどちらに寄せるかのおおまかな選択で十分という判断。
+const GIF_SIZE_PRESETS = { large: 960, medium: 640, small: 400 };
+const DEFAULT_GIF_SIZE = "large";
+
+function resolveMaxDimension(size) {
+  return GIF_SIZE_PRESETS[size] ?? GIF_SIZE_PRESETS[DEFAULT_GIF_SIZE];
+}
 // エンコード(Worker側)がフレームサンプリングに追いつかない場合、投げたフレームの
 // うちまだWorkerが処理していないものの数(バックログ)。これを無制限に溜めると、
 // 1フレームあたり数MB(例: 960x540のRGBAで約2MB)のピクセルデータが際限なく
@@ -191,7 +199,17 @@ async function processTiles({ tiles, region, dpr, filename }) {
 // videoWidth/videoHeight を使った実測比率でのクロップ計算(上記)は保険として
 // 残す(要求した解像度が何らかの理由でそのまま通らなかった場合でも、実際の
 // 映像サイズを基準にする限り破綻しないため)。
-async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr, lightweight, fps, diffThreshold }) {
+async function startRecording({
+  streamId,
+  rect,
+  viewportWidth,
+  viewportHeight,
+  dpr,
+  lightweight,
+  fps,
+  diffThreshold,
+  size,
+}) {
   if (recording) {
     log("startRecording called while already recording");
     return { ok: false, error: "既に録画中です" };
@@ -200,6 +218,7 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
   const resolvedFps = resolveFps(fps);
   const frameIntervalMs = Math.round(1000 / resolvedFps);
   const resolvedDiffThreshold = resolveDiffThreshold(diffThreshold);
+  const maxDimension = resolveMaxDimension(size);
   log("startRecording", {
     streamId,
     rect,
@@ -210,6 +229,8 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
     resolvedFps,
     diffThreshold,
     resolvedDiffThreshold,
+    size,
+    maxDimension,
   });
 
   const videoConstraints = {
@@ -274,11 +295,11 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
 
   const sourceWidth = crop ? crop.sw : videoWidth;
   const sourceHeight = crop ? crop.sh : videoHeight;
-  // 長辺が GIF_MAX_DIMENSION を超える場合は、以後のエンコード解像度そのものを
-  // 縮小する(理由は定数定義部を参照)。canvasの出力サイズをここで縮めておけば、
-  // captureGifFrame() の drawImage が縮小込みで描いてくれるため以降のコードは
-  // 変更不要。
-  const downscale = Math.min(1, GIF_MAX_DIMENSION / Math.max(sourceWidth, sourceHeight));
+  // 長辺が maxDimension(サイズ選択に応じた上限)を超える場合は、以後のエンコード
+  // 解像度そのものを縮小する(理由は定数定義部を参照)。canvasの出力サイズをここで
+  // 縮めておけば、captureGifFrame() の drawImage が縮小込みで描いてくれるため
+  // 以降のコードは変更不要。
+  const downscale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
   const width = Math.max(1, Math.round(sourceWidth * downscale));
   const height = Math.max(1, Math.round(sourceHeight * downscale));
   log("recording resolution", { sourceWidth, sourceHeight, width, height, downscale });

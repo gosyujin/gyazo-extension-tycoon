@@ -6,6 +6,7 @@ const btnRecordStop = document.getElementById("btn-record-stop");
 const chkLightweight = document.getElementById("chk-lightweight");
 const inputFps = document.getElementById("input-fps");
 const inputDiffThreshold = document.getElementById("input-diff-threshold");
+const selectSize = document.getElementById("select-size");
 
 // fps入力欄は数値のみ・1〜60に丸める(録画開始時にも念のため同じ丸めをかける)。
 function clampFps(value) {
@@ -88,11 +89,12 @@ function renderRecordingState(state) {
   const isRecording = !!state?.isRecording;
   btnRecordVisible.disabled = isRecording;
   btnRecordStop.disabled = !isRecording;
-  // 「軽量化するかどうか」「fps」「差分しきい値」は録画開始時に確定させ、
+  // 「軽量化するかどうか」「fps」「差分しきい値」「サイズ」は録画開始時に確定させ、
   // 録画終了までは変更させない。
   chkLightweight.disabled = isRecording;
   inputFps.disabled = isRecording;
   inputDiffThreshold.disabled = isRecording;
+  selectSize.disabled = isRecording;
   recordStatusEl.textContent = isRecording ? "録画中...(停止するとGIFが保存されます)" : "";
   recordCounterEl.textContent = formatCounter(state);
 
@@ -114,6 +116,7 @@ btnRecordVisible.addEventListener("click", async () => {
     lightweight: chkLightweight.checked,
     fps: clampFps(inputFps.value),
     diffThreshold: clampDiffThreshold(inputDiffThreshold.value),
+    size: selectSize.value,
   });
   if (response?.recordingState) renderRecordingState(response.recordingState);
 });

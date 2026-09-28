@@ -120,3 +120,15 @@
 .gyazo-ext-tycoon-toolbar-fps input:disabled {
   opacity: 0.45;
 }
+
+.gyazo-ext-tycoon-toolbar-fps select {
+  padding: 2px 4px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  font-size: 11px;
+  background: #fff;
+}
+
+.gyazo-ext-tycoon-toolbar-fps select:disabled {
+  opacity: 0.45;
+}

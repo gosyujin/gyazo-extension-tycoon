@@ -181,6 +181,26 @@
     diffThresholdLabel.appendChild(document.createTextNode("差分"));
     toolbarEl.appendChild(diffThresholdLabel);
 
+    // エンコード解像度(長辺の上限px)。自由入力ではなく大/中/小のプリセットから
+    // 選ぶだけにしている(値の意味は offscreen/offscreen.js の GIF_SIZE_PRESETS 参照。
+    // popup側にも同じものがある)。
+    const sizeLabel = document.createElement("label");
+    sizeLabel.className = "gyazo-ext-tycoon-toolbar-fps";
+    const sizeSelect = document.createElement("select");
+    for (const [value, text] of [
+      ["large", "大(960px)"],
+      ["medium", "中(640px)"],
+      ["small", "小(400px)"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      sizeSelect.appendChild(option);
+    }
+    sizeSelect.value = "large";
+    sizeLabel.appendChild(sizeSelect);
+    toolbarEl.appendChild(sizeLabel);
+
     // 録画開始からの「nフレーム / x秒」表示。画像保存(1回きりの単発処理)には
     // 付けない(録画のように継続する状態ではないため表示する意味が薄い)。
     // 録画していない間も「0フレーム / 0.0秒」を表示しておき、録画開始/終了の
@@ -213,6 +233,7 @@
       lightweightCheckbox.disabled = isRecording;
       fpsInput.disabled = isRecording;
       diffThresholdInput.disabled = isRecording;
+      sizeSelect.disabled = isRecording;
       counterEl.textContent = formatCounter(state);
       if (isRecording) {
         if (!toolbarPollTimer) {
@@ -243,6 +264,7 @@
               lightweight: lightweightCheckbox.checked,
               fps: clampFps(fpsInput.value),
               diffThreshold: clampDiffThreshold(diffThresholdInput.value),
+              size: sizeSelect.value,
             });
             if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
           }
@@ -356,7 +378,7 @@
         log("CROP_SELECTION_READY response", res);
       },
       canRecord: true,
-      onStartRecording: ({ lightweight, fps, diffThreshold } = {}) =>
+      onStartRecording: ({ lightweight, fps, diffThreshold, size } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect,
@@ -366,6 +388,7 @@
           lightweight,
           fps,
           diffThreshold,
+          size,
         }),
       outlineEl: selectionBoxEl,
     });
@@ -571,7 +594,7 @@
       // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
       // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ録画可能にする。
       recordDisabledReason: "選択した要素は画面からはみ出しているため録画できません(画像保存は可能です)",
-      onStartRecording: ({ lightweight, fps, diffThreshold } = {}) =>
+      onStartRecording: ({ lightweight, fps, diffThreshold, size } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect: rectPayload,
@@ -581,6 +604,7 @@
           lightweight,
           fps,
           diffThreshold,
+          size,
         }),
       outlineEl: highlightEl,
     });

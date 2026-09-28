@@ -91,6 +91,18 @@ button:disabled {
   opacity: 0.45;
 }
 
+.fps-label select {
+  flex: 1;
+  padding: 3px 5px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.fps-label select:disabled {
+  opacity: 0.45;
+}
+
 .link-button {
   border: none;
   background: none;

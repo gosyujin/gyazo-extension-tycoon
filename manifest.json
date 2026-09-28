@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gyazo Extension Tycoon",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "ブラウザの画面をPNG/GIFでキャプチャするChrome拡張機能（矩形選択・要素選択・表示中ページ・ページ全体）",
   "action": {
     "default_popup": "popup/popup.html",

@@ -42,6 +42,14 @@
         差分しきい値
         <input type="number" id="input-diff-threshold" min="0" max="255" step="1" value="24" />
       </label>
+      <label class="fps-label">
+        サイズ
+        <select id="select-size">
+          <option value="large" selected>大(長辺960px)</option>
+          <option value="medium">中(長辺640px)</option>
+          <option value="small">小(長辺400px)</option>
+        </select>
+      </label>
       <button id="btn-record-visible">表示中のページを録画開始</button>
       <button id="btn-record-stop" disabled>録画停止してGIF保存</button>
       <p id="record-counter" class="hint">0フレーム / 0.0秒</p>

@@ -147,11 +147,11 @@ async function startFullpageCaptureOnActiveTab() {
   await chrome.tabs.sendMessage(tab.id, { type: "START_FULLPAGE_CAPTURE" });
 }
 
-async function startRecordingVisiblePage({ lightweight, fps, diffThreshold } = {}) {
+async function startRecordingVisiblePage({ lightweight, fps, diffThreshold, size } = {}) {
   const tab = await getActiveTab();
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
   log("got tabCapture streamId, starting offscreen recording (visible page)");
-  const result = await sendToOffscreen({ type: "START_RECORDING", streamId, lightweight, fps, diffThreshold });
+  const result = await sendToOffscreen({ type: "START_RECORDING", streamId, lightweight, fps, diffThreshold, size });
   if (result?.ok) {
     setRecordingBadge(true);
   } else {
@@ -333,6 +333,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             lightweight: message.lightweight,
             fps: message.fps,
             diffThreshold: message.diffThreshold,
+            size: message.size,
           })
         );
         break;
@@ -356,6 +357,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           lightweight: message.lightweight,
           fps: message.fps,
           diffThreshold: message.diffThreshold,
+          size: message.size,
         });
         if (result?.ok) {
           setRecordingBadge(true);
