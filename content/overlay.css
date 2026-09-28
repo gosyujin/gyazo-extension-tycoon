@@ -100,6 +100,21 @@
   border: 1px solid #ccc;
   border-radius: 3px;
   font-size: 11px;
+  /* このツールバーはShadow DOM等で隔離せずページに直接挿入しているため、
+     ページ自身が document/window にグローバルなポインタ系イベントリスナーを
+     持っていると(カスタムのドラッグ操作やスクロール制御など)、この入力欄の
+     ネイティブなスピンボタン(上下の矢印)が「押しっぱなし」のまま固定される
+     不具合が起きうる(popupは独立したページのため影響を受けない。実機で報告あり)。
+     ページ側の実装に左右されず確実に直す方法が無いため、スピンボタン自体を
+     非表示にし、値の増減はキーボード入力またはフォーカス中の↑↓キーで行う
+     運用にした。 */
+  -moz-appearance: textfield;
+}
+
+.gyazo-ext-tycoon-toolbar-fps input::-webkit-inner-spin-button,
+.gyazo-ext-tycoon-toolbar-fps input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .gyazo-ext-tycoon-toolbar-fps input:disabled {
