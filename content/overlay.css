@@ -37,8 +37,11 @@
   position: fixed;
   z-index: 2147483647;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
   padding: 6px;
+  max-width: 280px;
   background: #fff;
   border: 1px solid #ccc;
   border-radius: 6px;
@@ -62,4 +65,22 @@
 .gyazo-ext-tycoon-toolbar button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.gyazo-ext-tycoon-toolbar-counter {
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.gyazo-ext-tycoon-toolbar-lightweight {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+  cursor: pointer;
 }

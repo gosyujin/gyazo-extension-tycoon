@@ -147,17 +147,21 @@ async function startFullpageCaptureOnActiveTab() {
   await chrome.tabs.sendMessage(tab.id, { type: "START_FULLPAGE_CAPTURE" });
 }
 
-async function startRecordingVisiblePage() {
+async function startRecordingVisiblePage({ lightweight } = {}) {
   const tab = await getActiveTab();
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
   log("got tabCapture streamId, starting offscreen recording (visible page)");
-  const result = await sendToOffscreen({ type: "START_RECORDING", streamId });
+  const result = await sendToOffscreen({ type: "START_RECORDING", streamId, lightweight });
   if (result?.ok) {
     setRecordingBadge(true);
   } else {
     notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
   }
-  return { recordingState: { isRecording: !!result?.ok }, result };
+  return { recordingState: { isRecording: !!result?.ok, frameCount: 0, elapsedMs: 0 }, result };
+}
+
+function formatSizeMb(bytes) {
+  return typeof bytes === "number" ? ` ${(bytes / (1024 * 1024)).toFixed(1)}MB` : "";
 }
 
 async function stopRecordingAndSave() {
@@ -166,7 +170,8 @@ async function stopRecordingAndSave() {
   setRecordingBadge(false);
   if (result?.ok && result.url) {
     await downloadUrl(result.url, filename);
-    notify(`GIFを保存しました(${result.frameCount}フレーム)`);
+    const lightenedNote = result.lightened ? " ※軽量化しました" : "";
+    notify(`GIFを保存しました(${result.frameCount}フレーム${formatSizeMb(result.size)})${lightenedNote}`);
   } else {
     notify(`GIFの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
   }
@@ -184,11 +189,17 @@ async function sendToOffscreen(message) {
   return result;
 }
 
-// 録画中かどうかは offscreen document に実態を聞きに行く(background 側では持たない)。
-async function queryIsRecording() {
-  if (!(await hasOffscreenDocument())) return false;
+// 録画中かどうか・フレーム数・経過時間は offscreen document に実態を聞きに行く
+// (background 側では持たない)。popup/ツールバーの「nフレーム / x秒」表示はこれを
+// ポーリングして更新する。
+async function queryRecordingState() {
+  if (!(await hasOffscreenDocument())) return { isRecording: false, frameCount: 0, elapsedMs: 0 };
   const result = await sendToOffscreen({ type: "GET_RECORDING_STATE" });
-  return !!result?.isRecording;
+  return {
+    isRecording: !!result?.isRecording,
+    frameCount: result?.frameCount ?? 0,
+    elapsedMs: result?.elapsedMs ?? 0,
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -297,7 +308,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         setRecordingBadge(false);
         if (message.result?.ok && message.result.url) {
           await downloadUrl(message.result.url, timestampedFilename("gif"));
-          notify("上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました");
+          const lightenedNote = message.result.lightened ? " ※軽量化しました" : "";
+          notify(
+            `上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました${formatSizeMb(message.result.size)}${lightenedNote}`
+          );
         } else {
           notify(`自動停止時の保存に失敗しました: ${message.result?.error ?? "不明なエラー"}`, { isError: true });
         }
@@ -306,15 +320,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case "GET_RECORDING_STATE": {
-        const isRecording = await queryIsRecording();
-        setRecordingBadge(isRecording);
-        sendResponse({ isRecording });
+        const state = await queryRecordingState();
+        setRecordingBadge(state.isRecording);
+        sendResponse(state);
         break;
       }
 
       // 表示中のページ(タブ全体)をそのまま録画開始する。
       case "START_RECORDING_VISIBLE": {
-        sendResponse(await startRecordingVisiblePage());
+        sendResponse(await startRecordingVisiblePage({ lightweight: message.lightweight }));
         break;
       }
 
@@ -333,6 +347,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           viewportWidth: message.viewportWidth,
           viewportHeight: message.viewportHeight,
           dpr: message.dpr,
+          lightweight: message.lightweight,
         });
         if (result?.ok) {
           setRecordingBadge(true);

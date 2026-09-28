@@ -142,6 +142,9 @@ async function processTiles({ tiles, region, dpr, filename }) {
 // --- GIF: tabCapture のライブストリームからフレームをサンプリングしてエンコード ---
 // rect/viewportWidth/viewportHeight が渡された場合(矩形選択・要素選択からの録画
 // 開始)は、映像内の該当領域だけを毎フレーム切り出す。渡されなければタブ全体を録画する。
+// lightweight が true の場合、gif-worker.js に「軽量化」を指示する(録画自体の
+// 解像度・フレームレートは変えず、保存直前にサイズが目安を超えていたら再エンコードで
+// 縮める。詳細は gif-worker.js の retainFrames/lightenGif 参照)。
 //
 // クロップ座標は rect(CSS px, ビューポート相対)を dpr 倍するのではなく、
 // 「映像の実解像度 / 選択時のビューポートCSS pxサイズ」を実測した比率で変換する。
@@ -162,7 +165,7 @@ async function processTiles({ tiles, region, dpr, filename }) {
 // videoWidth/videoHeight を使った実測比率でのクロップ計算(上記)は保険として
 // 残す(要求した解像度が何らかの理由でそのまま通らなかった場合でも、実際の
 // 映像サイズを基準にする限り破綻しないため)。
-async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr }) {
+async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr, lightweight }) {
   if (recording) {
     log("startRecording called while already recording");
     return { ok: false, error: "既に録画中です" };
@@ -264,7 +267,11 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
       };
       worker.addEventListener("message", onMessage);
       worker.addEventListener("error", reject, { once: true });
-      worker.postMessage({ type: "init", paletteRefreshInterval: GIF_PALETTE_REFRESH_INTERVAL });
+      worker.postMessage({
+        type: "init",
+        paletteRefreshInterval: GIF_PALETTE_REFRESH_INTERVAL,
+        retainFrames: !!lightweight,
+      });
     });
   } catch (err) {
     worker.terminate();
@@ -285,6 +292,9 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
     pendingFrames: 0, // まだWorkerがエンコードし終えていないフレーム数(バックログ)
     // 各フレームのdelayを実測するための直前フレーム時刻(理由はcaptureGifFrame参照)。
     lastFrameAt: performance.now(),
+    // 録画開始からの経過時間表示(popup/ツールバーの「nフレーム / x秒」)用。
+    // lastFrameAtはフレームスキップ時に更新されないため、実時間の経過には使えない。
+    startedAt: performance.now(),
   };
 
   worker.addEventListener("message", (event) => {
@@ -304,7 +314,13 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
           const url = blobToObjectUrl(result.blob, "auto-stopped-recording.gif");
           chrome.runtime.sendMessage({
             type: "RECORDING_AUTO_STOPPED",
-            result: { ok: true, url, frameCount: result.frameCount },
+            result: {
+              ok: true,
+              url,
+              frameCount: result.frameCount,
+              lightened: result.lightened,
+              size: result.blob.size,
+            },
           });
         } else {
           chrome.runtime.sendMessage({ type: "RECORDING_AUTO_STOPPED", result });
@@ -369,12 +385,14 @@ async function finishRecording() {
 
   // finish を送る時点までにキューイングした "frame" メッセージは、Worker内で
   // メッセージ到着順に同期処理されるため、Workerがそれらをすべて処理し終えてから
-  // "done" が返ってくる(=バックログがあっても取りこぼされない)。
-  const bytes = await new Promise((resolve, reject) => {
+  // "done" が返ってくる(=バックログがあっても取りこぼされない)。「軽量化」が
+  // オンでサイズが目安を超えていた場合、Worker内で再エンコードしてから
+  // "done" が返るため多少時間がかかることがある。
+  const { bytes, lightened, width, height } = await new Promise((resolve, reject) => {
     const onMessage = (event) => {
       if (event.data?.type === "done") {
         worker.removeEventListener("message", onMessage);
-        resolve(event.data.bytes);
+        resolve(event.data);
       }
     };
     worker.addEventListener("message", onMessage);
@@ -387,16 +405,22 @@ async function finishRecording() {
   if (frameCount === 0) {
     return { ok: false, error: "フレームが取得できませんでした" };
   }
-  log("gif encoded", bytes.length, "bytes");
+  log("gif encoded", bytes.length, "bytes", { lightened, width, height });
   const blob = new Blob([bytes], { type: "image/gif" });
-  return { ok: true, blob, frameCount };
+  return { ok: true, blob, frameCount, lightened, width, height };
 }
 
 async function stopRecording({ filename }) {
   const result = await finishRecording();
   if (!result.ok) return result;
   const url = blobToObjectUrl(result.blob, filename);
-  return { ok: true, url, frameCount: result.frameCount };
+  return {
+    ok: true,
+    url,
+    frameCount: result.frameCount,
+    lightened: result.lightened,
+    size: result.blob.size,
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -418,7 +442,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse(await stopRecording(message));
         break;
       case "GET_RECORDING_STATE":
-        sendResponse({ isRecording: !!recording, frameCount: recording?.frameCount ?? 0 });
+        sendResponse({
+          isRecording: !!recording,
+          frameCount: recording?.frameCount ?? 0,
+          elapsedMs: recording ? performance.now() - recording.startedAt : 0,
+        });
         break;
       default:
         log("unhandled message type", message.type);

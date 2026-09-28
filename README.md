@@ -24,6 +24,8 @@ Chrome Extension (Manifest V3) として、ブラウザの画面を PNG / GIF �
 - **GIF(パラパラ漫画、直接録画)**
   - 表示中のページ(タブ全体)を録画開始/停止。停止すると GIF としてダウンロードされる。
   - 録画中はツールバーアイコンに `REC` バッジを表示する(矩形/要素選択のツールバーから録画を開始した場合は popup が閉じているため、録画中であることが見た目でわかるようにするため)。
+  - 録画開始ボタンの横に、録画開始からの「nフレーム / x秒」を表示する(REC バッジだけではわかりにくいため)。
+  - 「動画を軽量化する」チェックボックス(録画開始〜終了まで変更不可)をオンにすると、保存前にGIFが約5MBを超えていた場合、コマ数(なめらかさ)は変えずに解像度・色数を下げて縮小してから保存する。
 - **キーボードショートカット**
   - 上記の操作はすべて `chrome://extensions/shortcuts`(Chrome標準のショートカット設定画面)からキー割り当てできる。popup 最下部の「⌨ キーボードショートカットを設定」から直接開ける。独自の設定UIは作らず、割り当てそのものはChromeに任せる方針(理由は下記「実装ログ」参照)。
 - **保存**
@@ -38,7 +40,7 @@ Gyazo / Imgur へのアップロードは未実装(将来の拡張ポイント�
 | [background/service-worker.js](background/service-worker.js) | 全体のオーケストレーター。popup / content script / offscreen document 間のメッセージ中継、`chrome.tabs.captureVisibleTab` / `chrome.scripting` / `chrome.tabCapture` / `chrome.offscreen` の呼び出しを一元管理。Blob や canvas は一切扱わない。 |
 | [content/content-script.js](content/content-script.js) | ページ内に注入され、矩形選択・要素選択のオーバーレイ UI(選択確定後の「画像保存/録画開始」ツールバーを含む)と、フルページ/大きい要素向けの「スクロールしながら分割撮影」ループを担当。 |
 | [offscreen/offscreen.js](offscreen/offscreen.js) | Canvas によるトリミング/タイル結合、`MediaStream` を使った GIF 用フレームサンプリング、`chrome.downloads.download` の呼び出しを担当。 |
-| [offscreen/gif-worker.js](offscreen/gif-worker.js) | GIF エンコード(パレット計算・色マッピング・LZW圧縮)専用の Web Worker。フレームサンプリングと同じスレッドで重いエンコード処理を行うとサンプリング自体が止まってカクつくため、offscreen.js から分離した(経緯は下記「実装ログ」参照)。 |
+| [offscreen/gif-worker.js](offscreen/gif-worker.js) | GIF エンコード(パレット計算・色マッピング・LZW圧縮)専用の Web Worker。フレームサンプリングと同じスレッドで重いエンコード処理を行うとサンプリング自体が止まってカクつくため、offscreen.js から分離した(経緯は下記「実装ログ」参照)。「動画を軽量化する」オプション使用時は、保存直前にコマ数を維持したまま解像度・色数を下げて再エンコードする役割も持つ。 |
 | [popup/popup.html](popup/popup.html) / [popup.js](popup/popup.js) | ツールバーのボタン UI。 |
 | [vendor/gifenc](vendor/gifenc) | GIF エンコード用に [gifenc](https://github.com/mattdesl/gifenc)(MIT License)の配布用 ESM バンドルをそのまま同梱。ビルド不要で `import` できるため採用。 |
 
@@ -210,3 +212,22 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
 - [content/overlay.css](content/overlay.css) の `.gyazo-ext-tycoon-selection-box`(矩形選択のドラッグ中の枠)、`.gyazo-ext-tycoon-highlight`(要素選択時のホバー枠)、および両者の `-locked`(選択確定後)バリアントから `background` 指定を削除し、`border` のみで範囲を示すようにした。枠線の色・太さ自体は変更していない。
 - manifest を 0.5.1 に更新(見た目のみの小さい変更のため patch バンプ)。
 - **未検証**: 構文チェックのみ。実機での見た目の確認が必要。
+
+### 2026-09-28 (録画中のフレーム数・秒数表示 / GIFの「軽量化」オプションを追加)
+- ユーザーから2つの要望を受けて対応した。「拡張アイコンのREC表示だけでは録画中かわかりにくいので、画像保存・録画開始ボタンの横にフレーム数・経過秒数を表示したい」「保存前にGIFを軽量化できるチェックボックスが欲しい(コマ数=なめらかさは維持したまま、5MBくらいを目安にサイズダウンしたい)」。
+- **フレーム数・経過秒数表示**:
+  - 表示先は popup(表示中のページの録画)と、矩形選択・要素選択確定後に出る操作ツールバー(content script)の両方。画像保存(単発処理)側には付けていない(要望の「もしくは何もしない」を採用。保存は連射可能な一回性の処理で、継続する状態を表す値がなく、カウンターを出す意味が薄いため)。
+  - 録画中かどうか・実際のフレーム数は元々 offscreen document(録画の実体を持つ)に `GET_RECORDING_STATE` で問い合わせる設計だったので(2026-09-27の実装ログ参照)、そこに `elapsedMs`(`performance.now() - recording.startedAt`)を追加しただけで済んだ。`recording.startedAt` は録画開始時刻で、既存の `lastFrameAt`(フレームスキップ時は更新されない)とは別に持たせている。経過秒数は「実際に録画にかかった時間」を表示したいため、フレームスキップの有無に関わらず進み続ける必要があるため。
+  - popup・ツールバーはどちらも、録画中は `GET_RECORDING_STATE` を 500ms 間隔でポーリングして「nフレーム / x秒」表示を更新し、録画停止で止める(background/offscreen側からのpush通知の仕組みは無いため、シンプルなポーリングを選択)。
+- **「動画を軽量化する」チェックボックス**:
+  - 要望通り「コマ数(なめらかさ)は維持したまま、サイズだけ約5MBを目安に下げる」ため、フレームを間引く方向ではなく、①解像度を段階的に下げる→それでも大きければ②パレット色数を段階的に下げる、の順で再エンコードする方式にした(色数を減らす方が視覚的な劣化(バンディング)が目立ちやすいため、解像度側を先に試す)。
+  - 実装場所は [offscreen/gif-worker.js](offscreen/gif-worker.js)。この Worker は元々ストリーミングでGIFをエンコードしており(フレームが来るたびに `quantize`/`applyPalette`/`writeFrame` してその場でエンコード済みバイト列に変換し、生ピクセルは保持しない設計だった)、軽量化のための再エンコードには元データが必要になる。生のRGBA(1pixelあたり4byte)をそのまま全フレーム分保持するとメモリを圧迫しすぎるため、**どのみち通常エンコードの過程で計算している「量子化後のindex(1byteパレット/pixel)+そのフレームが使ったpalette」をそのまま保持する**方式にした(RGBA保持の1/4で済み、追加の計算コストもほぼゼロ)。再エンコード時は `palette[index]` で元のRGBAに劣化なく復元してから、解像度変更(`OffscreenCanvas`でリサイズ、Workerでも利用可能)・再quantizeを行う。
+  - この保持(`retainFrames`)は「軽量化」チェックボックスがオンの録画でのみ行う(オフなら従来通り何も保持しない)。チェックボックスは録画開始ボタンを押したら録画終了まで disabled にする(録画方式の前提が録画中に変わるのを防ぐため)。
+  - 実際に軽量化するかどうかは、録画終了時(`finish`)に一度だけ判定する。通常のストリーミングエンコード結果が 5MB(`LIGHTWEIGHT_TARGET_BYTES`)を超えていた場合のみ保持しておいたフレームから再エンコードし、超えていなければ何もしない(要望の「5MBくらいを目処に」に対応。既に小さいGIFをわざわざ画質劣化させる理由がないため)。縮小の下限は長辺240px(`LIGHTWEIGHT_MIN_DIMENSION`、これ以上縮めると何が写っているかわからなくなるため)。目安に収まらなくても、試した中で一番小さかった結果を採用する(「絶対5MB以下にする」ではなく「目処」という要望のニュアンスに合わせた)。
+  - この再エンコードは全保持フレームに対して複数解像度・複数色数で quantize/applyPalette をやり直すため軽くはないが、録画終了後に一度だけ走る処理であり、「サイズを減らすためなら多少時間がかかってもよい」という機能の性質上許容できると判断した。
+  - `lightweight` フラグは popup(`START_RECORDING_VISIBLE`)・矩形/要素選択ツールバー(`RECT_READY_FOR_RECORDING`)の両経路から `background/service-worker.js` → `offscreen/offscreen.js``startRecording()` → `gif-worker.js` の `init` メッセージ(`retainFrames`)まで一貫して引き回している。`chrome.commands`(キーボードショートカットの `record-visible`)経由の開始にはチェックボックスのUIが無いため、軽量化オフ固定とした(この点は既知の制限として残す)。
+  - 保存完了の通知(`chrome.notifications`)にファイルサイズ(MB)と、軽量化を実際に行ったかどうかを付記するようにした([background/service-worker.js](background/service-worker.js) の `formatSizeMb()`)。
+  - **既知の制限・未検証事項**:
+    - 「軽量化」オンで長時間録画すると、保持するフレーム数(量子化後データ)がそのまま録画時間に比例してメモリを消費し続ける(既存の `GIF_MAX_FRAMES` = 最大約90秒ぶんが上限ではあるが、それでもオフ時より格段にメモリを使う)。長時間録画+軽量化の組み合わせでタブがクラッシュしないかは実機での確認が必要。
+    - このセッションでは構文チェック(`node --check` / ESM部分は `node --input-type=module --check`)のみで、実機のChromeでの動作確認はできていない。特に、①フレーム数・秒数表示が録画中に正しく更新されるか、②軽量化チェックボックスをオンにした録画で実際にファイルサイズが目安通り下がるか(かつコマ数が減っていないか)、③再エンコードにかかる時間が体感的に許容できる範囲か、は実機での確認が必要。
+- manifest を 0.6.0 に更新(まとまった機能追加のため minor バンプ)。

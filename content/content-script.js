@@ -28,6 +28,10 @@
   let toolbarEl = null;
   let dragStart = null;
   let keydownHandler = null;
+  // ツールバーの「nフレーム / x秒」表示を更新するポーリング(showActionToolbar内で
+  // 開始・停止する)。toolbarEl 自体を消しても setInterval は止まらないため、
+  // cleanupOverlay からも明示的に止められるようモジュールスコープに置く。
+  let toolbarPollTimer = null;
 
   function cleanupOverlay() {
     overlayEl?.remove();
@@ -42,6 +46,10 @@
     if (keydownHandler) {
       window.removeEventListener("keydown", keydownHandler, true);
       keydownHandler = null;
+    }
+    if (toolbarPollTimer) {
+      clearInterval(toolbarPollTimer);
+      toolbarPollTimer = null;
     }
   }
 
@@ -97,13 +105,58 @@
     const recordBtn = document.createElement("button");
     recordBtn.type = "button";
     recordBtn.textContent = "録画開始";
+    toolbarEl.appendChild(recordBtn);
 
-    async function refreshRecordLabel() {
+    // 録画開始からの「nフレーム / x秒」表示。画像保存(1回きりの単発処理)には
+    // 付けない(録画のように継続する状態ではないため表示する意味が薄い)。
+    const counterEl = document.createElement("span");
+    counterEl.className = "gyazo-ext-tycoon-toolbar-counter";
+    toolbarEl.appendChild(counterEl);
+
+    // 「動画を軽量化する」: オンにすると、録画終了時にGIFが5MB程度を超えていた場合
+    // フレーム数(なめらかさ)を保ったまま解像度・色数を下げて再エンコードする
+    // (詳細は offscreen/gif-worker.js 参照)。録画中に設定を変えられると開始時の
+    // 前提と食い違うため、録画開始〜終了の間は disabled にする。
+    const lightweightLabel = document.createElement("label");
+    lightweightLabel.className = "gyazo-ext-tycoon-toolbar-lightweight";
+    const lightweightCheckbox = document.createElement("input");
+    lightweightCheckbox.type = "checkbox";
+    lightweightLabel.appendChild(lightweightCheckbox);
+    lightweightLabel.appendChild(document.createTextNode("軽量化"));
+    toolbarEl.appendChild(lightweightLabel);
+
+    function formatCounter(state) {
+      if (!state?.isRecording) return "";
+      const seconds = (state.elapsedMs ?? 0) / 1000;
+      return `${state.frameCount ?? 0}フレーム / ${seconds.toFixed(1)}秒`;
+    }
+
+    async function fetchRecordingState() {
       try {
-        const state = await chrome.runtime.sendMessage({ type: "GET_RECORDING_STATE" });
-        recordBtn.textContent = state?.isRecording ? "録画停止" : "録画開始";
+        return await chrome.runtime.sendMessage({ type: "GET_RECORDING_STATE" });
       } catch (err) {
         console.error(LOG_PREFIX, "GET_RECORDING_STATE failed", err);
+        return null;
+      }
+    }
+
+    // 実際に録画中かどうか・フレーム数・経過時間は offscreen document が真実の
+    // 情報源なので、ボタンラベル・チェックボックスのdisabled・カウンター表示を
+    // まとめてこの関数経由で同期させる。
+    function applyRecordingState(state) {
+      const isRecording = !!state?.isRecording;
+      recordBtn.textContent = isRecording ? "録画停止" : "録画開始";
+      lightweightCheckbox.disabled = isRecording;
+      counterEl.textContent = formatCounter(state);
+      if (isRecording) {
+        if (!toolbarPollTimer) {
+          toolbarPollTimer = setInterval(async () => {
+            applyRecordingState(await fetchRecordingState());
+          }, 500);
+        }
+      } else if (toolbarPollTimer) {
+        clearInterval(toolbarPollTimer);
+        toolbarPollTimer = null;
       }
     }
 
@@ -114,26 +167,27 @@
       recordBtn.addEventListener("click", async () => {
         recordBtn.disabled = true;
         try {
-          const state = await chrome.runtime.sendMessage({ type: "GET_RECORDING_STATE" });
+          const state = await fetchRecordingState();
           if (state?.isRecording) {
             await chrome.runtime.sendMessage({ type: "STOP_RECORDING" });
             if (outlineEl) outlineEl.style.visibility = "";
           } else {
             if (outlineEl) outlineEl.style.visibility = "hidden";
-            const result = await onStartRecording();
+            const result = await onStartRecording({ lightweight: lightweightCheckbox.checked });
             if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
           }
         } catch (err) {
           console.error(LOG_PREFIX, "toggle recording failed", err);
           if (outlineEl) outlineEl.style.visibility = "";
         } finally {
-          await refreshRecordLabel();
+          applyRecordingState(await fetchRecordingState());
           recordBtn.disabled = false;
         }
       });
-      refreshRecordLabel();
+      // ツールバー表示時点で(別経路から開始されて)既に録画中だった場合にも
+      // 正しいラベル・カウンターで開始できるよう、実態を問い合わせて初期化する。
+      fetchRecordingState().then(applyRecordingState);
     }
-    toolbarEl.appendChild(recordBtn);
 
     document.documentElement.appendChild(toolbarEl);
     positionToolbar(toolbarEl, anchorRect);
@@ -232,13 +286,14 @@
         log("CROP_SELECTION_READY response", res);
       },
       canRecord: true,
-      onStartRecording: () =>
+      onStartRecording: ({ lightweight } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect,
           viewportWidth,
           viewportHeight,
           dpr: window.devicePixelRatio || 1,
+          lightweight,
         }),
       outlineEl: selectionBoxEl,
     });
@@ -444,13 +499,14 @@
       // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
       // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ録画可能にする。
       recordDisabledReason: "選択した要素は画面からはみ出しているため録画できません(画像保存は可能です)",
-      onStartRecording: () =>
+      onStartRecording: ({ lightweight } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect: rectPayload,
           viewportWidth: captureViewportWidth,
           viewportHeight,
           dpr: window.devicePixelRatio || 1,
+          lightweight,
         }),
       outlineEl: highlightEl,
     });

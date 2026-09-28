@@ -26,8 +26,13 @@
 
     <section>
       <h2>GIF(パラパラ漫画)</h2>
+      <label class="checkbox-label">
+        <input type="checkbox" id="chk-lightweight" />
+        動画を軽量化する(目安5MB。保存前に圧縮します)
+      </label>
       <button id="btn-record-visible">表示中のページを録画開始</button>
       <button id="btn-record-stop" disabled>録画停止してGIF保存</button>
+      <p id="record-counter" class="hint"></p>
       <p id="record-status" class="hint"></p>
     </section>
 

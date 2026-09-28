@@ -1,7 +1,9 @@
 const messageEl = document.getElementById("message");
 const recordStatusEl = document.getElementById("record-status");
+const recordCounterEl = document.getElementById("record-counter");
 const btnRecordVisible = document.getElementById("btn-record-visible");
 const btnRecordStop = document.getElementById("btn-record-stop");
+const chkLightweight = document.getElementById("chk-lightweight");
 
 function showMessage(text) {
   messageEl.textContent = text;
@@ -42,16 +44,41 @@ document.getElementById("btn-fullpage").addEventListener("click", async () => {
   window.close();
 });
 
+// 録画中は「nフレーム / x秒」を表示する。実際のフレーム数・経過時間は
+// offscreen document(録画の実体を持つ)が真実の情報源なので、録画中は
+// GET_RECORDING_STATE を定期的にポーリングして表示を更新する。
+function formatCounter(state) {
+  if (!state?.isRecording) return "";
+  const seconds = (state.elapsedMs ?? 0) / 1000;
+  return `${state.frameCount ?? 0}フレーム / ${seconds.toFixed(1)}秒`;
+}
+
+let pollTimer = null;
+
 function renderRecordingState(state) {
   const isRecording = !!state?.isRecording;
   btnRecordVisible.disabled = isRecording;
   btnRecordStop.disabled = !isRecording;
+  // 「軽量化するかどうか」は録画開始時に確定させ、録画終了までは変更させない。
+  chkLightweight.disabled = isRecording;
   recordStatusEl.textContent = isRecording ? "録画中...(停止するとGIFが保存されます)" : "";
+  recordCounterEl.textContent = formatCounter(state);
+
+  if (isRecording) {
+    if (!pollTimer) {
+      pollTimer = setInterval(async () => {
+        renderRecordingState(await send("GET_RECORDING_STATE"));
+      }, 500);
+    }
+  } else if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
 }
 
 btnRecordVisible.addEventListener("click", async () => {
   btnRecordVisible.disabled = true;
-  const response = await send("START_RECORDING_VISIBLE");
+  const response = await send("START_RECORDING_VISIBLE", { lightweight: chkLightweight.checked });
   if (response?.recordingState) renderRecordingState(response.recordingState);
 });
 
