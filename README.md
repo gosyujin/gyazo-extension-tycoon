@@ -21,6 +21,7 @@ Chrome Extension (Manifest V3) として、ブラウザの画面を PNG / GIF �
 - **PNG(直接保存)**
   - 表示中のビューポートをそのまま保存
   - ページ全体(スクロールしながら分割撮影して結合)を保存
+  - ページ内の `<video>` の現在のフレームを保存(スクリーン撮影ではなく `<video>` 要素を直接 canvas に描画するため、動画自体の解像度で・一時停止中でも撮れる)
 - **GIF(パラパラ漫画、直接録画)**
   - 表示中のページ(タブ全体)を録画開始/停止。停止すると GIF としてダウンロードされる。
   - 録画中はツールバーアイコンに `REC` バッジを表示する(矩形/要素選択のツールバーから録画を開始した場合は popup が閉じているため、録画中であることが見た目でわかるようにするため)。
@@ -300,3 +301,11 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - `chrome.commands`(キーボードショートカットの `record-visible`)経由は他の設定項目と同様、入力UIが無いため引き続きデフォルト値固定(既知の制限として残す。なお `chrome.storage` に保存された値をここでも使うようにする改善余地はあるが、今回のスコープ外として見送った)。
   - **未検証**: 構文チェックのみ。実機で、①中/小サイズや変更したfps・しきい値で録画したあと、popup・ツールバーの両方で次回開いたときに同じ値になっているか、②popupで変更した値がツールバー側にも反映される(逆も然り)か、③拡張機能を再読み込み(Reload)・ブラウザ再起動後も値が保持されるか、の確認が必要。
 - manifest を 0.10.0 に更新(機能追加のため minor バンプ)。
+
+### 2026-09-28 (続き: 「動画フレームを保存する」ボタンを追加)
+- ユーザーから、実機にインストール済みの本家 Gyazo Chrome拡張機能(`~/Library/Application Support/Google/Chrome/Default/Extensions/ffdaeeijbbijklfcpahbghahojgfgebo/5.17.0_0/`)にある「動画フレーム」ボタン(ページに `<video>` がある場合だけメニューに出る、`_locales/*/messages.json` の `snapVideoFrame`)相当の機能を実装したいという要望を受けた。該当拡張機能はビルド後の圧縮JSで難読化されておりロジックの完全な復元はできなかったが、`document.querySelector("video")` の有無でボタンの表示可否を決めている点は確認できたため、「ページ内の動画の“今の1コマ”を静止画として保存する」機能として実装した。
+  - **既存のPNG撮影(`chrome.tabs.captureVisibleTab`)を使わない設計にした**: このプロジェクトの矩形選択・要素選択・フルページはすべて「画面を撮影してから該当範囲を切り出す」方式(background の `captureActiveTabPng()` → offscreen でクロップ)だが、動画フレームはこの方式に乗せなかった。理由: (1) 画面撮影だと動画の表示サイズ(CSSでの縮小・ページの拡大率)に解像度が引きずられ、動画自体が持つ実解像度(`videoWidth`/`videoHeight`)を活かせない、(2) 一時停止中の動画は問題にならないが、任意のタイミングでのフレームを正確に切り出したい用途にはスクリーン撮影より `<video>` 要素を直接 canvas に `drawImage()` する方が単純かつ正確、(3) `<video>` 要素はDOMの一部として content script から直接触れるため、そもそも background 側のスクリーン撮影(レート制限あり)や offscreen 側のクロップ計算を経由する必要がない。**対応**: [content/content-script.js](content/content-script.js) に `captureVideoFrame()` を追加し、`document.querySelectorAll("video")` から実際に読み込まれている(`videoWidth`/`videoHeight` > 0)ものを集め、再生中のものを優先(無ければ最初に見つかったもの)して選び、その `videoWidth`/`videoHeight` のcanvasに `drawImage` → `toDataURL("image/png")` するだけで完結させた。data URL は文字列としてそのまま `chrome.runtime.sendMessage` の応答に乗せられるため、他のPNG機能のように offscreen document を経由する必要がない(このプロジェクトの他の全PNG/GIF機能は offscreen 経由だが、これだけは content script → background の一往復で完結する、意図的な例外)。
+  - **クロスオリジン動画への対応**: 動画のソースが別オリジンでCORSヘッダーが無い場合、`drawImage` した canvas は "tainted" になり `toDataURL()` が `SecurityError` を投げる。これを `try/catch` で捕まえ、`{ ok: false, error: "..." }` として返し、background 側が既存の `notify()` パターンでエラー通知するようにした(黙って失敗しない、既存方針([CLAUDE.md](CLAUDE.md))通り)。
+  - **経路**: popup(新設の「動画フレームを保存する」ボタン、[popup/popup.html](popup/popup.html)・[popup.js](popup/popup.js))・`chrome.commands` のキーボードショートカット(`capture-video-frame` を新設、[manifest.json](manifest.json))のいずれも `CAPTURE_VIDEO_FRAME` メッセージを送り、[background/service-worker.js](background/service-worker.js) の `captureVideoFrameOnActiveTab()` が content script を注入してメッセージを送信、返ってきた data URL をそのまま `chrome.downloads.download` する(他の機能と同じ `injectContentScript()`/`downloadUrl()`/`notify()` を再利用)。矩形選択・要素選択のような「範囲を選んでから操作する」UIは不要(対象は動画要素そのもので、選ぶ範囲という概念がないため)、ボタン1つで完結する設計にした。
+  - **未検証**: このセッションも構文チェック(`node --check`)のみで、実機のChromeでの動作確認はできていない。特に、①`<video>` が実際に見つかり正しいフレームが保存されるか、②複数`<video>`があるページ(広告動画など)で意図した(再生中の)ものが選ばれるか、③YouTube等クロスオリジン動画で想定通りエラー通知になるか(あるいは想定に反して取得できてしまうか)、④一時停止中の動画でも保存できるか、の確認が必要。
+- manifest を 0.11.0 に更新(機能追加のため minor バンプ)。

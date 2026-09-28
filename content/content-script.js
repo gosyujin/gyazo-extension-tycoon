@@ -660,6 +660,44 @@
     await runTileCapture({ pageLeft: 0, pageTop: 0, width, height });
   }
 
+  // ページ内の <video> の「今表示されているフレーム」をcanvasに直接drawImageして
+  // PNG化する(chrome.tabs.captureVisibleTab によるスクリーン撮影は使わない)。
+  // 動画自体の実解像度(videoWidth/videoHeight)でそのまま撮れるため、画面表示サイズや
+  // 拡大率に左右されず、一時停止中の動画でも撮影できる。
+  // 複数 <video> がある場合は、実際に読み込まれている(サイズが確定している)ものの
+  // うち再生中のものを優先し、無ければ最初に見つかったものを使う。
+  function pickVideoElement() {
+    const videos = Array.from(document.querySelectorAll("video")).filter(
+      (v) => v.videoWidth > 0 && v.videoHeight > 0
+    );
+    if (videos.length === 0) return null;
+    return videos.find((v) => !v.paused && !v.ended) ?? videos[0];
+  }
+
+  function captureVideoFrame() {
+    const video = pickVideoElement();
+    if (!video) {
+      return { ok: false, error: "動画が見つかりません(再生できる状態の<video>がありません)" };
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/png");
+      return { ok: true, dataUrl, width: canvas.width, height: canvas.height };
+    } catch (err) {
+      // クロスオリジンの動画(CORS未対応)を drawImage すると canvas が
+      // "tainted" になり、toDataURL が SecurityError を投げる。
+      log("captureVideoFrame failed (likely tainted canvas)", err);
+      return {
+        ok: false,
+        error: "動画フレームの取得に失敗しました(クロスオリジンの動画など、取得がブロックされている可能性があります)",
+      };
+    }
+  }
+
   function waitFor(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -746,6 +784,9 @@
       case "START_FULLPAGE_CAPTURE":
         startFullpageCapture().then(() => sendResponse({ ok: true }));
         return true;
+      case "CAPTURE_VIDEO_FRAME":
+        sendResponse(captureVideoFrame());
+        break;
       default:
         break;
     }

@@ -99,6 +99,11 @@ document.getElementById("btn-fullpage").addEventListener("click", async () => {
   window.close();
 });
 
+document.getElementById("btn-video-frame").addEventListener("click", async () => {
+  await send("CAPTURE_VIDEO_FRAME");
+  window.close();
+});
+
 // 「nフレーム / x秒」を常に表示する(録画していない間も 0フレーム / 0.0秒 を
 // 表示し続ける)。録画開始/終了のたびに表示の有無が切り替わって表示領域が
 // 広がったり狭まったりするのを避けるため。実際のフレーム数・経過時間は

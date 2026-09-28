@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gyazo Extension Tycoon",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "ブラウザの画面をPNG/GIFでキャプチャするChrome拡張機能（矩形選択・要素選択・表示中ページ・ページ全体）",
   "action": {
     "default_popup": "popup/popup.html",
@@ -33,6 +33,9 @@
     },
     "capture-fullpage": {
       "description": "ページ全体をPNG保存する"
+    },
+    "capture-video-frame": {
+      "description": "動画フレームを保存する"
     },
     "record-visible": {
       "description": "表示中のページのGIF録画を開始する"

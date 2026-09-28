@@ -147,6 +147,25 @@ async function startFullpageCaptureOnActiveTab() {
   await chrome.tabs.sendMessage(tab.id, { type: "START_FULLPAGE_CAPTURE" });
 }
 
+// 動画フレームの撮影自体(canvasへのdrawImage・PNG化)は content script 側で行う
+// (video要素の実ピクセルを直接扱えるDOM操作のため、offscreen document 経由の
+// スクリーン撮影は不要)。ここでは content script を注入してメッセージを送り、
+// 返ってきた data URL をそのままダウンロードするだけ。
+async function captureVideoFrameOnActiveTab() {
+  const tab = await getActiveTab();
+  await injectContentScript(tab);
+  const result = await chrome.tabs.sendMessage(tab.id, { type: "CAPTURE_VIDEO_FRAME" });
+  if (result?.ok && result.dataUrl) {
+    await downloadUrl(result.dataUrl, timestampedFilename("png"));
+    notify("動画フレームを保存しました");
+  } else {
+    notify(`動画フレームの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, {
+      isError: true,
+    });
+  }
+  return result;
+}
+
 async function startRecordingVisiblePage({ lightweight, fps, diffThreshold, size } = {}) {
   const tab = await getActiveTab();
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
@@ -230,6 +249,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "START_FULLPAGE_CAPTURE": {
         await startFullpageCaptureOnActiveTab();
         sendResponse({ ok: true });
+        break;
+      }
+
+      case "CAPTURE_VIDEO_FRAME": {
+        sendResponse(await captureVideoFrameOnActiveTab());
         break;
       }
 
@@ -408,6 +432,9 @@ chrome.commands.onCommand.addListener((command) => {
         break;
       case "capture-fullpage":
         await startFullpageCaptureOnActiveTab();
+        break;
+      case "capture-video-frame":
+        await captureVideoFrameOnActiveTab();
         break;
       case "record-visible":
         await startRecordingVisiblePage();
