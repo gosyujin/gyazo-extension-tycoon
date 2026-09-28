@@ -37,11 +37,11 @@
   position: fixed;
   z-index: 2147483647;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
   padding: 6px;
-  max-width: 280px;
+  white-space: nowrap;
   background: #fff;
   border: 1px solid #ccc;
   border-radius: 6px;

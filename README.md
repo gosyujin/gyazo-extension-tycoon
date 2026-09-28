@@ -242,3 +242,10 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
      - **対応**: `finishRecording()` で `clearInterval` した直後に `recording.stoppedAt = performance.now()` を記録し、`GET_RECORDING_STATE` の `elapsedMs` 計算を `(recording.stoppedAt ?? performance.now()) - recording.startedAt` に変更した([offscreen/offscreen.js](offscreen/offscreen.js))。フレーム取り込みが止まった瞬間に経過時間の計算も同じ時刻で止まるため、エンコード待ちの間はフレーム数・秒数がどちらも同じタイミングで固定されて見える。
   - **未検証**: 引き続き構文チェック(`node --check` / ESM部分は `node --input-type=module --check`)のみ。実機で、①録画前後でツールバー・popupの大きさが変わらないこと、②停止ボタンを押してから保存完了までの間、フレーム数・秒数が同じ値で固定されて見えること、の確認が必要。
 - manifest を 0.6.1 に更新(表示の不具合修正のため patch バンプ)。
+
+### 2026-09-28 (続き: 操作ツールバーを1行に収める)
+- ユーザーから「[画像保存] [録画開始] ☐軽量化 0フレーム / 0.0秒 ←これで1行にして」との指摘を受けて対応した。
+- 原因: [content/overlay.css](content/overlay.css) の `.gyazo-ext-tycoon-toolbar` に `flex-wrap: wrap` と `max-width: 280px` を指定していたため、要素(画像保存/録画開始ボタン、軽量化チェックボックス、カウンター)がその幅に収まりきらず2行に折り返されていた。
+- **対応**: `flex-wrap: nowrap` に変更し `max-width` を外した(`white-space: nowrap` も追加)。`position: fixed` な `flex` コンテナは内容に応じて幅が決まる(shrink-to-fit)ため、折り返しを禁止すれば常に1行に収まる。また、要素の並び順をユーザーが書いた通り「画像保存・録画開始・軽量化チェックボックス・カウンター」になるよう [content/content-script.js](content/content-script.js) の `showActionToolbar()` 内での `appendChild` 順を変更した(以前はカウンターを軽量化チェックボックスより先に追加していた)。
+- **未検証**: 構文チェックのみ。実機で1行に収まること、選択範囲が画面端にある場合でもツールバーが画面外にはみ出さないこと(`positionToolbar()` は `el.offsetWidth` を見て位置を調整する既存ロジックのままなので大きな影響はない想定だが未確認)の確認が必要。
+- manifest を 0.6.2 に更新(見た目のみの小さい修正のため patch バンプ)。
