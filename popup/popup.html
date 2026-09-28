@@ -35,6 +35,13 @@
         <input type="number" id="input-fps" min="1" max="60" step="1" value="30" />
         fps
       </label>
+      <label
+        class="fps-label"
+        title="前フレームとの差分(0〜255)がこの値以下のピクセルは「変化なし」として再描画しない(サイズは下がるが、大きくしすぎると残像が出やすくなる)。0で常に全ピクセル再描画(残像なし・サイズは大きめ)。"
+      >
+        差分しきい値
+        <input type="number" id="input-diff-threshold" min="0" max="255" step="1" value="24" />
+      </label>
       <button id="btn-record-visible">表示中のページを録画開始</button>
       <button id="btn-record-stop" disabled>録画停止してGIF保存</button>
       <p id="record-counter" class="hint">0フレーム / 0.0秒</p>

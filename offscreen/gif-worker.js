@@ -28,12 +28,12 @@ const LIGHTWEIGHT_COLOR_STEPS = [128, 64, 32];
 // 1つ空けておく必要があるため、quantize()は255色までに抑える。
 const MAX_PALETTE_COLORS = 255;
 const TRANSPARENT_INDEX = 255;
-// 前フレームとの差分(RGB各チャンネルの絶対差の合計)がこの値以下なら「変化なし」
-// とみなして透過にする。tabCaptureの映像はコーデックを経由しないため基本的に
-// ピクセル完全一致するはずだが、GPU合成の端数処理などによる微小な揺れを吸収する
-// ための遊び(暫定値)。大きくしすぎると実際の変化を取りこぼして残像的に見える
-// リスクがあるため、あくまで「人の目にわからない程度」の小さい値にとどめる。
-const FRAME_DIFF_THRESHOLD = 24;
+// diffThreshold(init時に指定、未指定時のフォールバック)。ピクセルごとにRGB各
+// チャンネルの絶対差の合計がこの値以下なら「変化なし」とみなして透過にする。
+// popup/ツールバーの入力欄で録画開始のたびに調整できる(詳細はREADME参照)。
+const DEFAULT_FRAME_DIFF_THRESHOLD = 24;
+const MIN_FRAME_DIFF_THRESHOLD = 0;
+const MAX_FRAME_DIFF_THRESHOLD = 255;
 
 let GIFEncoder;
 let quantize;
@@ -43,9 +43,12 @@ let gif = null;
 let palette = null;
 let frameCount = 0;
 let paletteRefreshInterval = 5;
-// 直前フレームの生RGBA(差分判定用)。postMessageで受け取ったバッファは
-// このWorkerが所有権を持ち他から参照されないため、コピーせず参照を保持するだけでよい。
-let prevRawData = null;
+let diffThreshold = DEFAULT_FRAME_DIFF_THRESHOLD;
+// 「今実際にGIFとして見えている(=最後に透過ではなく描画した)」各ピクセルの生RGBA。
+// 差分判定は直前に取り込んだフレームとではなく、必ずこれと比較する(理由は下記
+// "frame" ケースのコメント参照)。postMessageで受け取ったバッファはこのWorkerが
+// 所有権を持ち他から参照されないため、コピーせず更新しながら使い回す。
+let lastDrawnData = null;
 // 「軽量化」がオンのときだけ、再エンコード用に各フレームの量子化済みデータ
 // (index + そのフレームが使ったpalette + delay)を保持する。RGBAそのものより
 // 1/4のメモリで済む(量子化はどのみち通常エンコードの過程で行っているため、
@@ -72,7 +75,10 @@ self.onmessage = async (event) => {
       paletteRefreshInterval = msg.paletteRefreshInterval || 5;
       retainFrames = !!msg.retainFrames;
       retained = [];
-      prevRawData = null;
+      diffThreshold = Number.isFinite(msg.diffThreshold)
+        ? Math.min(MAX_FRAME_DIFF_THRESHOLD, Math.max(MIN_FRAME_DIFF_THRESHOLD, msg.diffThreshold))
+        : DEFAULT_FRAME_DIFF_THRESHOLD;
+      lastDrawnData = null;
       self.postMessage({ type: "initDone" });
       break;
     }
@@ -94,32 +100,46 @@ self.onmessage = async (event) => {
         frameHeight = height;
       }
 
-      // 前フレームとほぼ変化していないピクセルは透過色にして書き込む。
-      // dispose:1("そのまま残す")と組み合わせると、変化していない領域はデコード時に
-      // 前フレームの絵がそのまま透けて見える(=実質的にそのピクセルは再描画されない)。
-      // GIFのLZW圧縮は同じ値が連続するほど効くため、静止部分が多い画面録画では
-      // これだけでファイルサイズが大きく下がる。解像度・フレーム数・実際に変化した
-      // ピクセルの色はどれも一切劣化させない(詳細はREADME参照)。
+      // 「今実際に見えている絵(lastDrawnData)」とほぼ変化していないピクセルは
+      // 透過色にして書き込む。dispose:1("そのまま残す")と組み合わせると、変化して
+      // いない領域はデコード時に前フレームの絵がそのまま透けて見える(=実質的に
+      // そのピクセルは再描画されない)。GIFのLZW圧縮は同じ値が連続するほど効くため、
+      // 静止部分が多い画面録画ではこれだけでファイルサイズが大きく下がる。
+      //
+      // 重要: 比較対象は「直前に取り込んだフレーム」ではなく「最後に実際に描画した
+      // (=透過にしなかった)値」でなければならない。直前フレームとだけ比較すると、
+      // 1フレームごとの変化量はしきい値以下でも、それが同じ方向に何フレームも
+      // 積み重なるケース(ゆっくりしたフェード・アニメーションなど)で、実際の見た目
+      // からどんどんズレていくのに一切再描画されず、残像(ゴースト)として見えてしまう
+      // バグがあった(実機で報告された不具合の原因)。「最後に描画した値」を基準にし、
+      // 実際に再描画したピクセルだけその基準値を更新することで、しきい値を超えた
+      // 時点で必ず補正され、ズレが際限なく蓄積することはなくなる。
       let writeIndex = index;
       const writeOptions = { palette, delay };
-      if (prevRawData) {
+      if (lastDrawnData) {
         writeIndex = new Uint8Array(index.length);
         for (let i = 0, o = 0; i < index.length; i++, o += 4) {
           const diff =
-            Math.abs(data[o] - prevRawData[o]) +
-            Math.abs(data[o + 1] - prevRawData[o + 1]) +
-            Math.abs(data[o + 2] - prevRawData[o + 2]);
-          writeIndex[i] = diff <= FRAME_DIFF_THRESHOLD ? TRANSPARENT_INDEX : index[i];
+            Math.abs(data[o] - lastDrawnData[o]) +
+            Math.abs(data[o + 1] - lastDrawnData[o + 1]) +
+            Math.abs(data[o + 2] - lastDrawnData[o + 2]);
+          if (diff <= diffThreshold) {
+            writeIndex[i] = TRANSPARENT_INDEX;
+          } else {
+            writeIndex[i] = index[i];
+            lastDrawnData[o] = data[o];
+            lastDrawnData[o + 1] = data[o + 1];
+            lastDrawnData[o + 2] = data[o + 2];
+          }
         }
         writeOptions.transparent = true;
         writeOptions.transparentIndex = TRANSPARENT_INDEX;
         writeOptions.dispose = 1;
+      } else {
+        // 最初のフレームは全ピクセルがそのまま「今見えている絵」になる。
+        lastDrawnData = data;
       }
       gif.writeFrame(writeIndex, width, height, writeOptions);
-      // 次フレームの差分判定用に、量子化前の生RGBAを保持しておく(量子化後の色を
-      // 基準にすると、パレット再計算のタイミングによって差分が実際の見た目の変化と
-      // ズレるため)。
-      prevRawData = data;
 
       frameCount++;
       self.postMessage({ type: "frameDone", frameCount });
@@ -154,7 +174,7 @@ self.onmessage = async (event) => {
       retained = [];
       frameWidth = 0;
       frameHeight = 0;
-      prevRawData = null;
+      lastDrawnData = null;
       break;
     }
     default:

@@ -34,6 +34,21 @@ function resolveFps(fps) {
   if (!Number.isFinite(n)) return DEFAULT_GIF_FPS;
   return Math.min(MAX_GIF_FPS, Math.max(MIN_GIF_FPS, Math.round(n)));
 }
+
+// フレーム差分エンコード(gif-worker.js参照)のしきい値。実機で「軽くなった代わりに
+// 残像が残る」との報告を受け、gif-worker.js側の比較ロジック自体のバグ(直前フレーム
+// とだけ比較していたため、ゆっくりした変化が際限なく積み重なって蓄積していた)を
+// 修正した上で、ユーザーが手元で良い値を探れるようpopup/ツールバーの入力欄から
+// 調整できるようにした。詳細・値の意味は gif-worker.js 冒頭のコメント参照。
+const DEFAULT_FRAME_DIFF_THRESHOLD = 24;
+const MIN_FRAME_DIFF_THRESHOLD = 0;
+const MAX_FRAME_DIFF_THRESHOLD = 255;
+
+function resolveDiffThreshold(diffThreshold) {
+  const n = Number(diffThreshold);
+  if (!Number.isFinite(n)) return DEFAULT_FRAME_DIFF_THRESHOLD;
+  return Math.min(MAX_FRAME_DIFF_THRESHOLD, Math.max(MIN_FRAME_DIFF_THRESHOLD, Math.round(n)));
+}
 // quantize()(パレット再計算)は全ピクセルを見るため重く、毎フレーム行うと
 // それ自体がWorker側の処理時間を延ばし、エンコードがサンプリングに追いつかなくなる
 // 原因になる。数フレームに1回だけ再計算し、間のフレームは同じパレットを
@@ -176,7 +191,7 @@ async function processTiles({ tiles, region, dpr, filename }) {
 // videoWidth/videoHeight を使った実測比率でのクロップ計算(上記)は保険として
 // 残す(要求した解像度が何らかの理由でそのまま通らなかった場合でも、実際の
 // 映像サイズを基準にする限り破綻しないため)。
-async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr, lightweight, fps }) {
+async function startRecording({ streamId, rect, viewportWidth, viewportHeight, dpr, lightweight, fps, diffThreshold }) {
   if (recording) {
     log("startRecording called while already recording");
     return { ok: false, error: "既に録画中です" };
@@ -184,7 +199,18 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
 
   const resolvedFps = resolveFps(fps);
   const frameIntervalMs = Math.round(1000 / resolvedFps);
-  log("startRecording", { streamId, rect, viewportWidth, viewportHeight, dpr, fps, resolvedFps });
+  const resolvedDiffThreshold = resolveDiffThreshold(diffThreshold);
+  log("startRecording", {
+    streamId,
+    rect,
+    viewportWidth,
+    viewportHeight,
+    dpr,
+    fps,
+    resolvedFps,
+    diffThreshold,
+    resolvedDiffThreshold,
+  });
 
   const videoConstraints = {
     mandatory: {
@@ -284,6 +310,7 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
         type: "init",
         paletteRefreshInterval: GIF_PALETTE_REFRESH_INTERVAL,
         retainFrames: !!lightweight,
+        diffThreshold: resolvedDiffThreshold,
       });
     });
   } catch (err) {

@@ -33,12 +33,19 @@
   // cleanupOverlay からも明示的に止められるようモジュールスコープに置く。
   let toolbarPollTimer = null;
 
-  // fps入力欄は数値のみ・1〜60に丸める(popup/popup.jsと同じロジック。ビルドツールを
-  // 使わない方針のため、共有モジュール化はせずそれぞれのファイルに持たせている)。
+  // fps・差分しきい値の入力欄は数値のみ・範囲内に丸める(popup/popup.jsと同じロジック。
+  // ビルドツールを使わない方針のため、共有モジュール化はせずそれぞれのファイルに
+  // 持たせている)。
   function clampFps(value) {
     const n = parseInt(value, 10);
     if (!Number.isFinite(n)) return 30;
     return Math.min(60, Math.max(1, n));
+  }
+
+  function clampDiffThreshold(value) {
+    const n = parseInt(value, 10);
+    if (!Number.isFinite(n)) return 24;
+    return Math.min(255, Math.max(0, n));
   }
 
   function cleanupOverlay() {
@@ -149,6 +156,31 @@
     fpsLabel.appendChild(document.createTextNode("fps"));
     toolbarEl.appendChild(fpsLabel);
 
+    // フレーム差分エンコード(gif-worker.js参照)のしきい値(0〜255、デフォルト24)。
+    // 大きくするほどファイルサイズは下がるが、変化を取りこぼして残像(ゴースト)が
+    // 出やすくなるトレードオフがあるため、実際の見え方を確認しながら調整できるように
+    // する。0にすると常に全ピクセル再描画され(差分化を実質無効化)、残像は出ないが
+    // ファイルサイズは差分化前と同程度に戻る。
+    const diffThresholdLabel = document.createElement("label");
+    diffThresholdLabel.className = "gyazo-ext-tycoon-toolbar-fps";
+    diffThresholdLabel.title =
+      "前フレームとの差分(0〜255)がこの値以下のピクセルは「変化なし」として再描画しない(サイズは下がるが、大きくしすぎると残像が出やすくなる)。0で常に全ピクセル再描画(残像なし・サイズは大きめ)。";
+    const diffThresholdInput = document.createElement("input");
+    diffThresholdInput.type = "number";
+    diffThresholdInput.min = "0";
+    diffThresholdInput.max = "255";
+    diffThresholdInput.step = "1";
+    diffThresholdInput.value = "24";
+    diffThresholdInput.addEventListener("input", () => {
+      diffThresholdInput.value = diffThresholdInput.value.replace(/[^0-9]/g, "");
+    });
+    diffThresholdInput.addEventListener("change", () => {
+      diffThresholdInput.value = String(clampDiffThreshold(diffThresholdInput.value));
+    });
+    diffThresholdLabel.appendChild(diffThresholdInput);
+    diffThresholdLabel.appendChild(document.createTextNode("差分"));
+    toolbarEl.appendChild(diffThresholdLabel);
+
     // 録画開始からの「nフレーム / x秒」表示。画像保存(1回きりの単発処理)には
     // 付けない(録画のように継続する状態ではないため表示する意味が薄い)。
     // 録画していない間も「0フレーム / 0.0秒」を表示しておき、録画開始/終了の
@@ -180,6 +212,7 @@
       recordBtn.textContent = isRecording ? "録画停止" : "録画開始";
       lightweightCheckbox.disabled = isRecording;
       fpsInput.disabled = isRecording;
+      diffThresholdInput.disabled = isRecording;
       counterEl.textContent = formatCounter(state);
       if (isRecording) {
         if (!toolbarPollTimer) {
@@ -209,6 +242,7 @@
             const result = await onStartRecording({
               lightweight: lightweightCheckbox.checked,
               fps: clampFps(fpsInput.value),
+              diffThreshold: clampDiffThreshold(diffThresholdInput.value),
             });
             if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
           }
@@ -322,7 +356,7 @@
         log("CROP_SELECTION_READY response", res);
       },
       canRecord: true,
-      onStartRecording: ({ lightweight, fps } = {}) =>
+      onStartRecording: ({ lightweight, fps, diffThreshold } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect,
@@ -331,6 +365,7 @@
           dpr: window.devicePixelRatio || 1,
           lightweight,
           fps,
+          diffThreshold,
         }),
       outlineEl: selectionBoxEl,
     });
@@ -536,7 +571,7 @@
       // スクロールしながらのタイル分割には対応できない(録画中にスクロール位置を
       // 動かすと録画内容自体が乱れる)。ビューポートに収まる要素のみ録画可能にする。
       recordDisabledReason: "選択した要素は画面からはみ出しているため録画できません(画像保存は可能です)",
-      onStartRecording: ({ lightweight, fps } = {}) =>
+      onStartRecording: ({ lightweight, fps, diffThreshold } = {}) =>
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect: rectPayload,
@@ -545,6 +580,7 @@
           dpr: window.devicePixelRatio || 1,
           lightweight,
           fps,
+          diffThreshold,
         }),
       outlineEl: highlightEl,
     });
