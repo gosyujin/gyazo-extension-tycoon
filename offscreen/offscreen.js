@@ -295,6 +295,9 @@ async function startRecording({ streamId, rect, viewportWidth, viewportHeight, d
     // 録画開始からの経過時間表示(popup/ツールバーの「nフレーム / x秒」)用。
     // lastFrameAtはフレームスキップ時に更新されないため、実時間の経過には使えない。
     startedAt: performance.now(),
+    // 停止操作を受けてフレーム取り込みを止めた時刻(finishRecording参照)。
+    // nullの間は録画中で、GET_RECORDING_STATEのelapsedMsは現在時刻を使う。
+    stoppedAt: null,
   };
 
   worker.addEventListener("message", (event) => {
@@ -379,6 +382,12 @@ async function finishRecording() {
   }
   clearInterval(recording.intervalId);
   recording.stream.getTracks().forEach((t) => t.stop());
+  // フレーム取り込みはここで止まるが、Workerのエンコード(軽量化時は再エンコードも)
+  // 完了までは recording は null にならない。この間も GET_RECORDING_STATE が
+  // elapsedMs を「今の時刻」から計算し続けると、フレーム数は止まっているのに
+  // 秒数だけ増え続けて見え、どちらが正しいのか分からなくなる。停止時刻を固定して
+  // 経過時間の計算をそこで止める。
+  recording.stoppedAt = performance.now();
 
   const { worker, frameCount } = recording;
   log("finishRecording, frameCount=", frameCount, "encode backlog=", recording.pendingFrames);
@@ -445,7 +454,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({
           isRecording: !!recording,
           frameCount: recording?.frameCount ?? 0,
-          elapsedMs: recording ? performance.now() - recording.startedAt : 0,
+          // 停止処理中(stoppedAtが入っている間)はフレーム数と同じく経過時間も
+          // そこで止めて、両者が一致した状態で見えるようにする。
+          elapsedMs: recording ? (recording.stoppedAt ?? performance.now()) - recording.startedAt : 0,
         });
         break;
       default:

@@ -109,8 +109,11 @@
 
     // 録画開始からの「nフレーム / x秒」表示。画像保存(1回きりの単発処理)には
     // 付けない(録画のように継続する状態ではないため表示する意味が薄い)。
+    // 録画していない間も「0フレーム / 0.0秒」を表示しておき、録画開始/終了の
+    // たびに表示の有無が切り替わってツールバーの大きさが変わらないようにする。
     const counterEl = document.createElement("span");
     counterEl.className = "gyazo-ext-tycoon-toolbar-counter";
+    counterEl.textContent = "0フレーム / 0.0秒";
     toolbarEl.appendChild(counterEl);
 
     // 「動画を軽量化する」: オンにすると、録画終了時にGIFが5MB程度を超えていた場合
@@ -126,9 +129,8 @@
     toolbarEl.appendChild(lightweightLabel);
 
     function formatCounter(state) {
-      if (!state?.isRecording) return "";
-      const seconds = (state.elapsedMs ?? 0) / 1000;
-      return `${state.frameCount ?? 0}フレーム / ${seconds.toFixed(1)}秒`;
+      const seconds = (state?.elapsedMs ?? 0) / 1000;
+      return `${state?.frameCount ?? 0}フレーム / ${seconds.toFixed(1)}秒`;
     }
 
     async function fetchRecordingState() {

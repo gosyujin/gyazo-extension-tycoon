@@ -231,3 +231,14 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
     - 「軽量化」オンで長時間録画すると、保持するフレーム数(量子化後データ)がそのまま録画時間に比例してメモリを消費し続ける(既存の `GIF_MAX_FRAMES` = 最大約90秒ぶんが上限ではあるが、それでもオフ時より格段にメモリを使う)。長時間録画+軽量化の組み合わせでタブがクラッシュしないかは実機での確認が必要。
     - このセッションでは構文チェック(`node --check` / ESM部分は `node --input-type=module --check`)のみで、実機のChromeでの動作確認はできていない。特に、①フレーム数・秒数表示が録画中に正しく更新されるか、②軽量化チェックボックスをオンにした録画で実際にファイルサイズが目安通り下がるか(かつコマ数が減っていないか)、③再エンコードにかかる時間が体感的に許容できる範囲か、は実機での確認が必要。
 - manifest を 0.6.0 に更新(まとまった機能追加のため minor バンプ)。
+
+### 2026-09-28 (続き: カウンター表示の2つの不具合を修正 — レイアウトのガタつき / 停止後も秒数だけ進む)
+- 上記 0.6.0 の実装について、ユーザーから2点の指摘を受けて修正した。
+  1. 「録画開始・終了でボタン表示領域が広がったり狭まったりするのは違和感がある。最初から『0フレーム / 0秒』でいいから表示してほしい」
+     - 原因: `formatCounter()` が「録画中でなければ空文字を返す」実装になっており、録画していない間はカウンター要素自体が空(高さ・幅ゼロ相当)になっていた。録画開始/終了のたびにテキストが出現/消滅し、その分ツールバー・popupのレイアウトが広がったり狭まったりしていた。
+     - **対応**: `isRecording` による出し分けをやめ、録画していない間は常に「0フレーム / 0.0秒」を表示するようにした([popup/popup.js](popup/popup.js) の `formatCounter()`、[content/content-script.js](content/content-script.js) の同名関数)。popup側は初期HTML([popup/popup.html](popup/popup.html))にも同じ文字列を書いておき、JS実行前の一瞬も空にならないようにした。ツールバー側もカウンター要素生成時に同じ初期値を設定した。
+  2. 「録画完了したタイミングでフレームは止まるのだが、秒は動き続けている。実際はどちらが正しいのかわかりにくい」
+     - 原因の切り分け: `STOP_RECORDING` を送った後、[offscreen/offscreen.js](offscreen/offscreen.js) の `finishRecording()` は `clearInterval` でフレーム取り込みをすぐ止める一方、Workerでのエンコード完了(「軽量化」オンで目安サイズを超えていた場合は再エンコードも)を待ってから `recording = null` にしていた。この待ち時間の間、`recording` はまだ非nullのため `GET_RECORDING_STATE` は `isRecording: true` を返し続け、`frameCount` は(取り込みが止まっているので)固定される一方、`elapsedMs` は `performance.now() - recording.startedAt` を都度計算していたため増え続けていた。popup/ツールバーは録画中500ms間隔でポーリングしているため、この間「フレーム数は止まっているのに秒数だけ進む」表示になっていた。
+     - **対応**: `finishRecording()` で `clearInterval` した直後に `recording.stoppedAt = performance.now()` を記録し、`GET_RECORDING_STATE` の `elapsedMs` 計算を `(recording.stoppedAt ?? performance.now()) - recording.startedAt` に変更した([offscreen/offscreen.js](offscreen/offscreen.js))。フレーム取り込みが止まった瞬間に経過時間の計算も同じ時刻で止まるため、エンコード待ちの間はフレーム数・秒数がどちらも同じタイミングで固定されて見える。
+  - **未検証**: 引き続き構文チェック(`node --check` / ESM部分は `node --input-type=module --check`)のみ。実機で、①録画前後でツールバー・popupの大きさが変わらないこと、②停止ボタンを押してから保存完了までの間、フレーム数・秒数が同じ値で固定されて見えること、の確認が必要。
+- manifest を 0.6.1 に更新(表示の不具合修正のため patch バンプ)。

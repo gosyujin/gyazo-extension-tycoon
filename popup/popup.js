@@ -44,13 +44,14 @@ document.getElementById("btn-fullpage").addEventListener("click", async () => {
   window.close();
 });
 
-// 録画中は「nフレーム / x秒」を表示する。実際のフレーム数・経過時間は
+// 「nフレーム / x秒」を常に表示する(録画していない間も 0フレーム / 0.0秒 を
+// 表示し続ける)。録画開始/終了のたびに表示の有無が切り替わって表示領域が
+// 広がったり狭まったりするのを避けるため。実際のフレーム数・経過時間は
 // offscreen document(録画の実体を持つ)が真実の情報源なので、録画中は
 // GET_RECORDING_STATE を定期的にポーリングして表示を更新する。
 function formatCounter(state) {
-  if (!state?.isRecording) return "";
-  const seconds = (state.elapsedMs ?? 0) / 1000;
-  return `${state.frameCount ?? 0}フレーム / ${seconds.toFixed(1)}秒`;
+  const seconds = (state?.elapsedMs ?? 0) / 1000;
+  return `${state?.frameCount ?? 0}フレーム / ${seconds.toFixed(1)}秒`;
 }
 
 let pollTimer = null;
