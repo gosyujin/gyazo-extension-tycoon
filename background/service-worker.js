@@ -36,12 +36,28 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-function timestampedFilename(ext) {
+// ファイル名に使うサイト識別子。ドメイン名の "." を "_" に置換する
+// (example.com → example_com、先頭の www. は落とす)。ファイル名に使えない文字は
+// "_" に潰し、URLが取れない/http(s)以外のページは scheme 名(file など)か "unknown" にする。
+function siteSlug(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return u.protocol.replace(":", "") || "unknown";
+    }
+    const host = u.host.replace(/^www\./, "");
+    return host.replace(/[^A-Za-z0-9-]/g, "_") || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function timestampedFilename(ext, url) {
   const d = new Date();
   const ts =
     `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}` +
     `-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
-  return `GyazoExtensionTycoon/capture-${ts}.${ext}`;
+  return `GyazoExtensionTycoon/${siteSlug(url)}-${ts}.${ext}`;
 }
 
 async function hasOffscreenDocument() {
@@ -125,7 +141,7 @@ async function injectContentScript(tab, { withOverlayCss = false } = {}) {
 async function captureVisiblePage() {
   const tab = await getActiveTab();
   const dataUrl = await captureActiveTabPng(tab.windowId);
-  await downloadUrl(dataUrl, timestampedFilename("png"));
+  await downloadUrl(dataUrl, timestampedFilename("png", tab.url));
   notify("表示中のページを保存しました");
 }
 
@@ -156,7 +172,7 @@ async function captureVideoFrameOnActiveTab() {
   await injectContentScript(tab);
   const result = await chrome.tabs.sendMessage(tab.id, { type: "CAPTURE_VIDEO_FRAME" });
   if (result?.ok && result.dataUrl) {
-    await downloadUrl(result.dataUrl, timestampedFilename("png"));
+    await downloadUrl(result.dataUrl, timestampedFilename("png", tab.url));
     notify("動画フレームを保存しました");
   } else {
     notify(`動画フレームの保存に失敗しました: ${result?.error ?? "不明なエラー"}`, {
@@ -172,6 +188,7 @@ async function startRecordingVisiblePage({ lightweight, fps, diffThreshold, size
   log("got tabCapture streamId, starting offscreen recording (visible page)");
   const result = await sendToOffscreen({ type: "START_RECORDING", streamId, lightweight, fps, diffThreshold, size });
   if (result?.ok) {
+    await rememberRecordingUrl(tab.url);
     setRecordingBadge(true);
   } else {
     notify(`録画の開始に失敗しました: ${result?.error ?? "不明なエラー"}`, { isError: true });
@@ -183,8 +200,20 @@ function formatSizeMb(bytes) {
   return typeof bytes === "number" ? ` ${(bytes / (1024 * 1024)).toFixed(1)}MB` : "";
 }
 
+// 録画対象のURLは録画開始時に保存しておき、停止/自動停止時に参照する
+// (停止時のアクティブタブは録画中のタブと別のことがあり、サービスワーカーの
+// 変数も再起動で消えるため、chrome.storage.session に持つ)。
+async function rememberRecordingUrl(url) {
+  await chrome.storage.session.set({ recordingUrl: url ?? "" });
+}
+
+async function recordedUrl() {
+  const { recordingUrl } = await chrome.storage.session.get("recordingUrl");
+  return recordingUrl;
+}
+
 async function stopRecordingAndSave() {
-  const filename = timestampedFilename("gif");
+  const filename = timestampedFilename("gif", await recordedUrl());
   const result = await sendToOffscreen({ type: "STOP_RECORDING", filename });
   setRecordingBadge(false);
   if (result?.ok && result.url) {
@@ -278,7 +307,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 矩形選択 or ビューポート内に収まる要素選択: 単発キャプチャ+クロップ
         const tab = sender.tab;
         const dataUrl = await captureActiveTabPng(tab.windowId);
-        const filename = timestampedFilename("png");
+        const filename = timestampedFilename("png", tab.url ?? sender.url);
         const result = await sendToOffscreen({
           type: "PROCESS_CROP",
           dataUrl,
@@ -298,7 +327,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case "TILES_READY": {
         // フルページ or ビューポートより大きい要素選択: タイル結合
-        const filename = timestampedFilename("png");
+        const filename = timestampedFilename("png", sender.tab?.url ?? sender.url);
         const result = await sendToOffscreen({
           type: "PROCESS_TILES",
           tiles: message.tiles,
@@ -331,7 +360,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         log("recording auto-stopped (max frames reached)", message.result);
         setRecordingBadge(false);
         if (message.result?.ok && message.result.url) {
-          await downloadUrl(message.result.url, timestampedFilename("gif"));
+          await downloadUrl(message.result.url, timestampedFilename("gif", await recordedUrl()));
           const lightenedNote = message.result.lightened ? " ※軽量化しました" : "";
           notify(
             `上限フレーム数に達したため自動的に録画を停止し、GIFを保存しました${formatSizeMb(message.result.size)}${lightenedNote}`
@@ -384,6 +413,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           size: message.size,
         });
         if (result?.ok) {
+          await rememberRecordingUrl(tab.url ?? sender.url);
           setRecordingBadge(true);
           notify("録画を開始しました(ページ上のツールバーまたは拡張機能アイコンから停止できます)");
         } else {

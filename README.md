@@ -309,3 +309,11 @@ Manifest V3 のサービスワーカーは DOM を持たないため、Canvas / 
   - **経路**: popup(新設の「動画フレームを保存する」ボタン、[popup/popup.html](popup/popup.html)・[popup.js](popup/popup.js))・`chrome.commands` のキーボードショートカット(`capture-video-frame` を新設、[manifest.json](manifest.json))のいずれも `CAPTURE_VIDEO_FRAME` メッセージを送り、[background/service-worker.js](background/service-worker.js) の `captureVideoFrameOnActiveTab()` が content script を注入してメッセージを送信、返ってきた data URL をそのまま `chrome.downloads.download` する(他の機能と同じ `injectContentScript()`/`downloadUrl()`/`notify()` を再利用)。矩形選択・要素選択のような「範囲を選んでから操作する」UIは不要(対象は動画要素そのもので、選ぶ範囲という概念がないため)、ボタン1つで完結する設計にした。
   - **未検証**: このセッションも構文チェック(`node --check`)のみで、実機のChromeでの動作確認はできていない。特に、①`<video>` が実際に見つかり正しいフレームが保存されるか、②複数`<video>`があるページ(広告動画など)で意図した(再生中の)ものが選ばれるか、③YouTube等クロスオリジン動画で想定通りエラー通知になるか(あるいは想定に反して取得できてしまうか)、④一時停止中の動画でも保存できるか、の確認が必要。
 - manifest を 0.11.0 に更新(機能追加のため minor バンプ)。
+
+### 2026-10-03 (ファイル名を「サイト名-日付-時刻」に変更)
+- ユーザーから、`capture-20260927-183521.png` のような時系列だけの命名を「どのサイトで撮ったか」が分かる形に変えたいとの要望。候補は「ドメイン名(example.com → example_com)」「ページの `<title>`」「クリーンURL」。
+- **ドメイン名を採用**(`example_com-20261003-123456.png`)。理由: タイトルは長く・日本語/記号を含み・ページ遷移で変わるため、ファイル名に使うとOS依存の禁則文字/長さ上限の処理が必要で、同じサイトの画像が並ばなくなる。クリーンURLはパスが入ると長大になり禁則文字が多い。ドメインなら短く安定していて、ファイラーで並べたとき同じサイトのキャプチャが自然にまとまる。`www.` は落とし、ポートは `_` 区切りで残す(`localhost_3000`)。`http(s)` 以外のページ(`file:` 等)は scheme 名、URLが取れない場合は `unknown`。
+- 実装は [background/service-worker.js](background/service-worker.js) の `siteSlug()` / `timestampedFilename(ext, url)`。静止画は撮影対象タブのURL(`tab.url` / content script 送信元)を使う。GIF録画は停止時のアクティブタブが録画タブと違うことがあり、サービスワーカーの変数は再起動で消えるため、録画開始時に `chrome.storage.session` へ録画対象URLを保存し、停止/自動停止時にそこから読む。
+- 保存先フォルダ(`GyazoExtensionTycoon/`)は変更なし。
+- **未検証**: 構文チェックのみ。実機で各撮影方法・GIF録画(別タブに切り替えて停止した場合を含む)のファイル名を確認する必要がある。
+- manifest を 0.12.0 に更新(機能変更のため minor バンプ)。
