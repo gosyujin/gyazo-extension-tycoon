@@ -133,6 +133,7 @@
       // ため、キャプチャ中は非表示にしないと枠線がそのまま画像に写り込む。
       if (outlineEl) outlineEl.style.visibility = "hidden";
       try {
+        await nextPaint();
         await onSave();
       } catch (err) {
         console.error(LOG_PREFIX, "save failed", err);
@@ -294,6 +295,7 @@
             if (outlineEl) outlineEl.style.visibility = "";
           } else {
             if (outlineEl) outlineEl.style.visibility = "hidden";
+            await nextPaint();
             const gifSettings = {
               fps: clampFps(fpsInput.value),
               diffThreshold: clampDiffThreshold(diffThresholdInput.value),
@@ -696,6 +698,13 @@
         error: "動画フレームの取得に失敗しました(クロスオリジンの動画など、取得がブロックされている可能性があります)",
       };
     }
+  }
+
+  // style 変更が実際に画面へ描画されるまで待つ(rAF は次の描画の直前に呼ばれるため2回待つ)。
+  // visibility を切り替えた直後に captureVisibleTab を呼ぶと、再描画前の画面が撮影されて
+  // 選択枠が写り込むことがある。
+  function nextPaint() {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   }
 
   function waitFor(ms) {
