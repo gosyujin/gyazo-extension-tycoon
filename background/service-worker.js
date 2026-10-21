@@ -314,6 +314,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           rect: message.rect,
           dpr: message.dpr,
           filename,
+          masks: message.masks,
         });
         if (result?.ok && result.url) {
           await downloadUrl(result.url, filename);
@@ -334,6 +335,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           region: message.region,
           dpr: message.dpr,
           filename,
+          masks: message.masks,
         });
         if (result?.ok && result.url) {
           await downloadUrl(result.url, filename);
@@ -411,6 +413,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           fps: message.fps,
           diffThreshold: message.diffThreshold,
           size: message.size,
+          masks: message.masks,
         });
         if (result?.ok) {
           await rememberRecordingUrl(tab.url ?? sender.url);

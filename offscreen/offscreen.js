@@ -104,9 +104,63 @@ async function loadBitmap(dataUrl) {
   return createImageBitmap(blob);
 }
 
+// --- マスク(黒塗り・モザイク) ---
+// masks: [{ type: "black" | "mosaic", left, top, width, height }](CSS px)。
+// 描画先canvas上の座標は `m.left * scaleX - originX` で求める(originX/Y は canvas の
+// 左上が元画像上で何px目にあたるか、scaleX/Y は CSS px → canvas px の倍率)。
+// マスクはページ上のDOMではなく、撮影した画素データそのものに焼き込む(DOMの
+// オーバーレイだとモザイクが表現できず、また撮影タイミング次第で写り損ねると
+// 機微情報がそのまま保存されてしまうため)。
+const MOSAIC_MIN_BLOCK_CSS_PX = 6;
+const MOSAIC_MAX_BLOCK_CSS_PX = 16;
+
+function applyMasks(ctx, masks, { originX, originY, scaleX, scaleY }) {
+  if (!Array.isArray(masks) || masks.length === 0) return;
+  const canvas = ctx.canvas;
+  for (const m of masks) {
+    const x = Math.max(0, Math.floor(m.left * scaleX - originX));
+    const y = Math.max(0, Math.floor(m.top * scaleY - originY));
+    const right = Math.min(canvas.width, Math.ceil((m.left + m.width) * scaleX - originX));
+    const bottom = Math.min(canvas.height, Math.ceil((m.top + m.height) * scaleY - originY));
+    const w = right - x;
+    const h = bottom - y;
+    if (w <= 0 || h <= 0) continue; // 撮影範囲の外
+
+    if (m.type === "mosaic") {
+      // ブロックの大きさはマスクの短辺に応じて決める(小さい文字を隠すのに大きすぎず、
+      // 大きい領域でも判読できなくなる程度)。
+      const blockCss = Math.min(
+        MOSAIC_MAX_BLOCK_CSS_PX,
+        Math.max(MOSAIC_MIN_BLOCK_CSS_PX, Math.min(m.width, m.height) / 3)
+      );
+      const block = Math.max(2, Math.round(blockCss * Math.min(scaleX, scaleY)));
+      const tw = Math.max(1, Math.ceil(w / block));
+      const th = Math.max(1, Math.ceil(h / block));
+      const tmp = document.createElement("canvas");
+      tmp.width = tw;
+      tmp.height = th;
+      const tctx = tmp.getContext("2d");
+      tctx.imageSmoothingEnabled = true;
+      tctx.imageSmoothingQuality = "high";
+      tctx.drawImage(canvas, x, y, w, h, 0, 0, tw, th);
+      // 拡大先は端数で最大 block-1 px マスク範囲を超えるため、範囲内にクリップする。
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmp, 0, 0, tw, th, x, y, tw * block, th * block);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(x, y, w, h);
+    }
+  }
+}
+
 // --- PNG: 矩形/ビューポート内要素のトリミング ---
-async function processCrop({ dataUrl, rect, dpr, filename }) {
-  log("processCrop", { rect, dpr, filename });
+async function processCrop({ dataUrl, rect, dpr, filename, masks }) {
+  log("processCrop", { rect, dpr, filename, maskCount: masks?.length ?? 0 });
   const bitmap = await loadBitmap(dataUrl);
   const sx = Math.max(0, Math.round(rect.left * dpr));
   const sy = Math.max(0, Math.round(rect.top * dpr));
@@ -125,6 +179,7 @@ async function processCrop({ dataUrl, rect, dpr, filename }) {
   canvas.height = sh;
   const ctx = canvas.getContext("2d");
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  applyMasks(ctx, masks, { originX: sx, originY: sy, scaleX: dpr, scaleY: dpr });
 
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
   const url = blobToObjectUrl(blob, filename);
@@ -132,8 +187,9 @@ async function processCrop({ dataUrl, rect, dpr, filename }) {
 }
 
 // --- PNG: フルページ/大きい要素のタイル結合 ---
-async function processTiles({ tiles, region, dpr, filename }) {
-  log("processTiles", { tileCount: tiles.length, region, dpr, filename });
+// masks はページ絶対座標(CSS px)。
+async function processTiles({ tiles, region, dpr, filename, masks }) {
+  log("processTiles", { tileCount: tiles.length, region, dpr, filename, maskCount: masks?.length ?? 0 });
   const { pageLeft, pageTop, width, height } = region;
   const canvasWidth = Math.round(width * dpr);
   const canvasHeight = Math.round(height * dpr);
@@ -167,6 +223,8 @@ async function processTiles({ tiles, region, dpr, filename }) {
   if (drawnTiles === 0) {
     throw new Error("結合できるタイルがありませんでした");
   }
+
+  applyMasks(ctx, masks, { originX: pageLeft * dpr, originY: pageTop * dpr, scaleX: dpr, scaleY: dpr });
 
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
   const url = blobToObjectUrl(blob, filename);
@@ -209,6 +267,7 @@ async function startRecording({
   fps,
   diffThreshold,
   size,
+  masks,
 }) {
   if (recording) {
     log("startRecording called while already recording");
@@ -278,6 +337,7 @@ async function startRecording({
   }
 
   let crop = null;
+  let cropScale = null;
   if (rect) {
     const scaleX = videoWidth / viewportWidth;
     const scaleY = videoHeight / viewportHeight;
@@ -291,6 +351,7 @@ async function startRecording({
       return { ok: false, error: `録画範囲が不正です(sw=${sw}, sh=${sh})` };
     }
     crop = { sx, sy, sw, sh };
+    cropScale = { scaleX, scaleY };
   }
 
   const sourceWidth = crop ? crop.sw : videoWidth;
@@ -303,6 +364,20 @@ async function startRecording({
   const width = Math.max(1, Math.round(sourceWidth * downscale));
   const height = Math.max(1, Math.round(sourceHeight * downscale));
   log("recording resolution", { sourceWidth, sourceHeight, width, height, downscale });
+
+  // マスク(黒塗り・モザイク)は毎フレーム、エンコード用canvas(クロップ・縮小後)に
+  // 描画した直後に焼き込む。座標は CSS px → 映像px(cropScale) → 縮小後(downscale)の順で
+  // 変換する。選択範囲(rect)付きの録画でのみ有効。
+  const maskParams =
+    crop && cropScale && Array.isArray(masks) && masks.length > 0
+      ? {
+          masks,
+          originX: crop.sx * downscale,
+          originY: crop.sy * downscale,
+          scaleX: cropScale.scaleX * downscale,
+          scaleY: cropScale.scaleY * downscale,
+        }
+      : null;
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -347,6 +422,7 @@ async function startRecording({
     ctx,
     worker,
     crop,
+    maskParams,
     width,
     height,
     frameIntervalMs,
@@ -408,11 +484,14 @@ function captureGifFrame() {
     return;
   }
 
-  const { ctx, video, width, height, crop, worker } = recording;
+  const { ctx, video, width, height, crop, maskParams, worker } = recording;
   if (crop) {
     ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, width, height);
   } else {
     ctx.drawImage(video, 0, 0, width, height);
+  }
+  if (maskParams) {
+    applyMasks(ctx, maskParams.masks, maskParams);
   }
   const imageData = ctx.getImageData(0, 0, width, height);
 
