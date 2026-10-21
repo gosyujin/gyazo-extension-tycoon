@@ -123,6 +123,9 @@
     toolbarEl?.remove();
     toolbarEl = document.createElement("div");
     toolbarEl.className = "gyazo-ext-tycoon-toolbar";
+    // 保存中にEscで cleanupOverlay() されて toolbarEl が null になっても、
+    // finally で安全に表示を戻せるようローカル参照を持っておく。
+    const bar = toolbarEl;
 
     const saveBtn = document.createElement("button");
     saveBtn.type = "button";
@@ -131,7 +134,13 @@
       saveBtn.disabled = true;
       // 録画と同様、選択枠(outlineEl)自体が撮影範囲の境界に重なって描画されている
       // ため、キャプチャ中は非表示にしないと枠線がそのまま画像に写り込む。
+      // ツールバー自身も position: fixed でビューポートに張り付いているため、
+      // ビューポートを超える範囲をスクロールしながらタイル撮影する場合は、タイルごとに
+      // 同じ位置のツールバーが写り込んで結合後の画像に何本も残る。単発撮影でも
+      // 画面端でツールバーが選択範囲に重なって置かれることがあるので、保存中は
+      // ツールバーごと非表示にする(finally で必ず戻す)。
       if (outlineEl) outlineEl.style.visibility = "hidden";
+      bar.style.visibility = "hidden";
       try {
         await nextPaint();
         await onSave();
@@ -139,6 +148,7 @@
         console.error(LOG_PREFIX, "save failed", err);
       } finally {
         if (outlineEl) outlineEl.style.visibility = "";
+        bar.style.visibility = "";
         saveBtn.disabled = false;
       }
     });
