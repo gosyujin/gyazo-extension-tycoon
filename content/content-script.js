@@ -33,6 +33,121 @@
   // cleanupOverlay からも明示的に止められるようモジュールスコープに置く。
   let toolbarPollTimer = null;
 
+  // --- マスク(黒塗り・モザイク) ---
+  // 選択範囲の中の機微な情報を保存前に隠すための矩形。ここ(ページ上)で持つのは
+  // 位置とプレビュー用のDOMだけで、実際の黒塗り・モザイクは撮影した画素データに対して
+  // offscreen document 側で焼き込む(offscreen/offscreen.js の applyMasks 参照)。
+  // 座標は選択枠と同じ position: fixed のビューポート座標(CSS px)。
+  const MIN_MASK_SIZE = 4;
+  let maskLayerEl = null; // プレビュー用のマスク要素を入れる全面コンテナ
+  let masks = []; // [{ type: "black" | "mosaic", left, top, width, height, el }]
+  let maskDrawing = null; // マスク描画モード中のみ { type, overlay }
+  let recordingActive = false; // 録画中はマスクの追加・取消を無効にする(開始時の値で固定されるため)
+
+  function ensureMaskLayer() {
+    if (!maskLayerEl) {
+      maskLayerEl = document.createElement("div");
+      maskLayerEl.className = "gyazo-ext-tycoon-mask-layer";
+      document.documentElement.appendChild(maskLayerEl);
+    }
+    return maskLayerEl;
+  }
+
+  function positionMaskEl(el, rect) {
+    el.style.left = `${rect.left}px`;
+    el.style.top = `${rect.top}px`;
+    el.style.width = `${rect.width}px`;
+    el.style.height = `${rect.height}px`;
+  }
+
+  function addMask(type, rect) {
+    const el = document.createElement("div");
+    el.className = `gyazo-ext-tycoon-mask gyazo-ext-tycoon-mask-${type}`;
+    positionMaskEl(el, rect);
+    ensureMaskLayer().appendChild(el);
+    masks.push({ type, left: rect.left, top: rect.top, width: rect.width, height: rect.height, el });
+    syncMaskButtons();
+  }
+
+  function undoLastMask() {
+    const last = masks.pop();
+    last?.el.remove();
+    syncMaskButtons();
+  }
+
+  // offscreen に渡すマスク一覧。ビューポート内の単発キャプチャ・録画用(ビューポート座標)。
+  function masksForViewport() {
+    return masks.map(({ type, left, top, width, height }) => ({ type, left, top, width, height }));
+  }
+
+  // スクロールしながらのタイル撮影用(ページ絶対座標)。プレビューは画面に固定されているので、
+  // 保存を押した時点のスクロール位置で変換する(見えている位置にマスクが掛かるように)。
+  function masksForPage() {
+    return masks.map(({ type, left, top, width, height }) => ({
+      type,
+      left: left + window.scrollX,
+      top: top + window.scrollY,
+      width,
+      height,
+    }));
+  }
+
+  function exitMaskMode() {
+    maskDrawing?.overlay.remove();
+    maskDrawing = null;
+    syncMaskButtons();
+  }
+
+  // 「黒塗り」「モザイク」ボタンの押下状態と「取消」ボタンの有効/無効を現状に合わせる。
+  function syncMaskButtons() {
+    if (!toolbarEl) return;
+    for (const btn of toolbarEl.querySelectorAll("[data-mask-type]")) {
+      const active = maskDrawing?.type === btn.dataset.maskType;
+      btn.classList.toggle("gyazo-ext-tycoon-toolbar-active", active);
+      btn.disabled = recordingActive;
+    }
+    const undoBtn = toolbarEl.querySelector("[data-mask-undo]");
+    if (undoBtn) undoBtn.disabled = recordingActive || masks.length === 0;
+  }
+
+  // ドラッグで矩形を描いてマスクを追加するモードに入る。連続して何個でも描け、
+  // Esc(または同じボタンをもう一度)で抜ける。
+  function enterMaskMode(type) {
+    exitMaskMode();
+    const overlay = document.createElement("div");
+    overlay.className = "gyazo-ext-tycoon-mask-overlay";
+    const draft = document.createElement("div");
+    draft.className = `gyazo-ext-tycoon-mask gyazo-ext-tycoon-mask-${type} gyazo-ext-tycoon-mask-draft`;
+    draft.style.display = "none";
+    overlay.appendChild(draft);
+    document.documentElement.appendChild(overlay);
+    maskDrawing = { type, overlay };
+
+    let start = null;
+    overlay.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      start = { x: e.clientX, y: e.clientY };
+      positionMaskEl(draft, rectFromPoints(start, start));
+      draft.style.display = "block";
+    });
+    overlay.addEventListener("mousemove", (e) => {
+      if (!start) return;
+      positionMaskEl(draft, rectFromPoints(start, { x: e.clientX, y: e.clientY }));
+    });
+    overlay.addEventListener("mouseup", (e) => {
+      if (!start) return;
+      const rect = rectFromPoints(start, { x: e.clientX, y: e.clientY });
+      start = null;
+      draft.style.display = "none";
+      // ミスクリック程度の小さすぎるドラッグは無視する
+      if (rect.width >= MIN_MASK_SIZE && rect.height >= MIN_MASK_SIZE) {
+        log("mask added", type, rect);
+        addMask(type, rect);
+      }
+    });
+    syncMaskButtons();
+  }
+
   // fps・差分しきい値の入力欄は数値のみ・範囲内に丸める(popup/popup.jsと同じロジック。
   // ビルドツールを使わない方針のため、共有モジュール化はせずそれぞれのファイルに
   // 持たせている)。
@@ -79,6 +194,11 @@
     selectionBoxEl?.remove();
     highlightEl?.remove();
     toolbarEl?.remove();
+    exitMaskMode();
+    maskLayerEl?.remove();
+    maskLayerEl = null;
+    masks = [];
+    recordingActive = false;
     overlayEl = null;
     selectionBoxEl = null;
     highlightEl = null;
@@ -106,6 +226,11 @@
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        // マスク描画中のEscは、選択全体ではなく描画モードだけを抜ける
+        if (maskDrawing) {
+          exitMaskMode();
+          return;
+        }
         cleanupOverlay();
         onEscape?.();
       }
@@ -127,11 +252,20 @@
     // finally で安全に表示を戻せるようローカル参照を持っておく。
     const bar = toolbarEl;
 
+    // 撮影・録画の間は選択枠もマスクのプレビューも隠す(どちらも画面に実在する要素なので、
+    // 隠さないと写り込む。マスクは offscreen 側で画素に焼き込むため、プレビューは不要)。
+    function setOverlaysHidden(hidden) {
+      const v = hidden ? "hidden" : "";
+      if (outlineEl) outlineEl.style.visibility = v;
+      if (maskLayerEl) maskLayerEl.style.visibility = v;
+    }
+
     const saveBtn = document.createElement("button");
     saveBtn.type = "button";
     saveBtn.textContent = "画像保存";
     saveBtn.addEventListener("click", async () => {
       saveBtn.disabled = true;
+      exitMaskMode();
       // 録画と同様、選択枠(outlineEl)自体が撮影範囲の境界に重なって描画されている
       // ため、キャプチャ中は非表示にしないと枠線がそのまま画像に写り込む。
       // ツールバー自身も position: fixed でビューポートに張り付いているため、
@@ -139,7 +273,7 @@
       // 同じ位置のツールバーが写り込んで結合後の画像に何本も残る。単発撮影でも
       // 画面端でツールバーが選択範囲に重なって置かれることがあるので、保存中は
       // ツールバーごと非表示にする(finally で必ず戻す)。
-      if (outlineEl) outlineEl.style.visibility = "hidden";
+      setOverlaysHidden(true);
       bar.style.visibility = "hidden";
       try {
         await nextPaint();
@@ -147,12 +281,38 @@
       } catch (err) {
         console.error(LOG_PREFIX, "save failed", err);
       } finally {
-        if (outlineEl) outlineEl.style.visibility = "";
+        setOverlaysHidden(false);
         bar.style.visibility = "";
         saveBtn.disabled = false;
       }
     });
     toolbarEl.appendChild(saveBtn);
+
+    // マスク(黒塗り・モザイク)。ボタンを押すとドラッグで矩形を描くモードに入り、
+    // もう一度押すかEscで抜ける。取消は直前に追加したマスクを1つ消す。
+    for (const [type, text] of [
+      ["black", "黒塗り"],
+      ["mosaic", "モザイク"],
+    ]) {
+      const maskBtn = document.createElement("button");
+      maskBtn.type = "button";
+      maskBtn.textContent = text;
+      maskBtn.dataset.maskType = type;
+      maskBtn.title = "ドラッグした範囲を隠す(保存する画像・GIFに反映)。もう一度押すかEscで終了";
+      maskBtn.addEventListener("click", () => {
+        if (maskDrawing?.type === type) exitMaskMode();
+        else enterMaskMode(type);
+      });
+      toolbarEl.appendChild(maskBtn);
+    }
+    const maskUndoBtn = document.createElement("button");
+    maskUndoBtn.type = "button";
+    maskUndoBtn.textContent = "取消";
+    maskUndoBtn.dataset.maskUndo = "";
+    maskUndoBtn.title = "直前に追加したマスクを取り消す";
+    maskUndoBtn.disabled = true;
+    maskUndoBtn.addEventListener("click", undoLastMask);
+    toolbarEl.appendChild(maskUndoBtn);
 
     const recordBtn = document.createElement("button");
     recordBtn.type = "button";
@@ -274,6 +434,8 @@
     // まとめてこの関数経由で同期させる。
     function applyRecordingState(state) {
       const isRecording = !!state?.isRecording;
+      recordingActive = isRecording;
+      syncMaskButtons();
       recordBtn.textContent = isRecording ? "録画停止" : "録画開始";
       lightweightCheckbox.disabled = isRecording;
       fpsInput.disabled = isRecording;
@@ -302,9 +464,10 @@
           const state = await fetchRecordingState();
           if (state?.isRecording) {
             await chrome.runtime.sendMessage({ type: "STOP_RECORDING" });
-            if (outlineEl) outlineEl.style.visibility = "";
+            setOverlaysHidden(false);
           } else {
-            if (outlineEl) outlineEl.style.visibility = "hidden";
+            exitMaskMode();
+            setOverlaysHidden(true);
             await nextPaint();
             const gifSettings = {
               fps: clampFps(fpsInput.value),
@@ -316,11 +479,11 @@
               lightweight: lightweightCheckbox.checked,
               ...gifSettings,
             });
-            if (!result?.ok && outlineEl) outlineEl.style.visibility = ""; // 開始失敗時は表示を戻す
+            if (!result?.ok) setOverlaysHidden(false); // 開始失敗時は表示を戻す
           }
         } catch (err) {
           console.error(LOG_PREFIX, "toggle recording failed", err);
-          if (outlineEl) outlineEl.style.visibility = "";
+          setOverlaysHidden(false);
         } finally {
           applyRecordingState(await fetchRecordingState());
           recordBtn.disabled = false;
@@ -424,6 +587,7 @@
           type: "CROP_SELECTION_READY",
           rect,
           dpr: window.devicePixelRatio || 1,
+          masks: masksForViewport(),
         });
         log("CROP_SELECTION_READY response", res);
       },
@@ -432,6 +596,7 @@
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect,
+          masks: masksForViewport(),
           viewportWidth,
           viewportHeight,
           dpr: window.devicePixelRatio || 1,
@@ -631,13 +796,20 @@
             type: "CROP_SELECTION_READY",
             rect: rectPayload,
             dpr: window.devicePixelRatio || 1,
+            masks: masksForViewport(),
           });
           log("CROP_SELECTION_READY response", res);
           return;
         }
         // ビューポートより大きい/画面外にはみ出す要素は、フルページと同じ
         // タイル分割撮影で対応する(ページ絶対座標に変換して範囲指定)。
-        await runTileCapture({ pageLeft, pageTop, width: rect.width, height: rect.height });
+        await runTileCapture({
+          pageLeft,
+          pageTop,
+          width: rect.width,
+          height: rect.height,
+          masks: masksForPage(),
+        });
       },
       canRecord: fitsInViewport,
       // GIF録画はライブ映像を毎フレーム切り出す都合上、フルページ撮影のような
@@ -648,6 +820,7 @@
         chrome.runtime.sendMessage({
           type: "RECT_READY_FOR_RECORDING",
           rect: rectPayload,
+          masks: masksForViewport(),
           viewportWidth: captureViewportWidth,
           viewportHeight,
           dpr: window.devicePixelRatio || 1,
@@ -736,7 +909,8 @@
   // pageLeft/pageTop/width/height はページ絶対座標(CSS px)。
   // スクロールしながら captureVisibleTab を繰り返し、タイル一覧を
   // background(→offscreen)に送って結合・保存してもらう。
-  async function runTileCapture({ pageLeft, pageTop, width, height }) {
+  // masks は保存時にページ絶対座標へ変換済みのもの(省略可)。
+  async function runTileCapture({ pageLeft, pageTop, width, height, masks: tileMasks }) {
     log("runTileCapture start", { pageLeft, pageTop, width, height });
     const dpr = window.devicePixelRatio || 1;
     const viewportWidth = document.documentElement.clientWidth;
@@ -783,6 +957,7 @@
         tiles,
         region: { pageLeft, pageTop, width, height, viewportWidth, viewportHeight },
         dpr,
+        masks: tileMasks,
       });
       log("TILES_READY response", res);
     } catch (err) {

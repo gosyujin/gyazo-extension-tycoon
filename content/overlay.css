@@ -37,11 +37,13 @@
   position: fixed;
   z-index: 2147483647;
   display: flex;
-  flex-wrap: nowrap;
+  /* マスク用ボタンが増えたぶん、狭いウィンドウでは折り返して画面内に収める */
+  flex-wrap: wrap;
+  max-width: calc(100vw - 12px);
+  box-sizing: border-box;
   align-items: center;
   gap: 6px;
   padding: 6px;
-  white-space: nowrap;
   background: #fff;
   border: 1px solid #ccc;
   border-radius: 6px;
@@ -55,6 +57,7 @@
   border-radius: 4px;
   background: #fafafa;
   font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -131,4 +134,49 @@
 
 .gyazo-ext-tycoon-toolbar-fps select:disabled {
   opacity: 0.45;
+}
+
+/* --- マスク(黒塗り・モザイク)のプレビュー ---
+   実際の黒塗り・モザイクは保存時に画素へ焼き込む(offscreen側)。ここは位置確認用の
+   見た目で、撮影・録画中は非表示になる。ツールバー/選択枠(2147483647)より下、
+   ページより上に置く。 */
+.gyazo-ext-tycoon-mask-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645;
+  pointer-events: none;
+}
+
+.gyazo-ext-tycoon-mask-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  cursor: crosshair;
+}
+
+.gyazo-ext-tycoon-mask {
+  position: fixed;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.gyazo-ext-tycoon-mask-black {
+  background: #000;
+}
+
+/* DOMでは画面のモザイク化ができないため、市松模様で「モザイクが掛かる範囲」を示す */
+.gyazo-ext-tycoon-mask-mosaic {
+  background: repeating-conic-gradient(#888 0% 25%, #ccc 0% 50%) 0 0 / 8px 8px;
+}
+
+.gyazo-ext-tycoon-mask-draft {
+  opacity: 0.6;
+  outline: 1px dashed #2f80ed;
+}
+
+.gyazo-ext-tycoon-toolbar button.gyazo-ext-tycoon-toolbar-active,
+.gyazo-ext-tycoon-toolbar button.gyazo-ext-tycoon-toolbar-active:hover:not(:disabled) {
+  background: #2f80ed;
+  border-color: #2f80ed;
+  color: #fff;
 }
