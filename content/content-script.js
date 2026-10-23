@@ -906,6 +906,52 @@
     return null;
   }
 
+  // sticky 要素が「今まさに貼り付いている(=スクロールしても画面上の位置が動かない)」か。
+  // 貼り付いていない sticky はページの流れの中の通常位置にあるだけなので隠す必要がない。
+  function isStickyStuck(cs, rect, viewportHeight) {
+    const top = parseFloat(cs.top);
+    const bottom = parseFloat(cs.bottom);
+    if (!Number.isNaN(top) && rect.top <= top + 0.5) return true;
+    if (!Number.isNaN(bottom) && viewportHeight - rect.bottom <= bottom + 0.5) return true;
+    return false;
+  }
+
+  // position: fixed / 貼り付き中の sticky 要素(追従ヘッダー・フッターバー・チャット
+  // ウィジェット・Cookieバナーなど)を visibility: hidden にして、戻すための関数を返す。
+  // タイル撮影ではこれらが毎タイル同じ画面位置に写り込んで本文を隠してしまう
+  // (スクロール後に突然出現するフッターバーなども含む)。visibility なので
+  // レイアウトは動かず、隠した下の本文がそのまま写るため、結合しても継ぎ目がずれない。
+  // keepTopAnchored が true のときは、ビューポート上半分にある要素(上端の追従ヘッダー
+  // など)は残す。ページ最上部のタイルでだけ使い、ヘッダーを結合画像の先頭に1回だけ
+  // 写すため。
+  function hideFloatingElements({ keepTopAnchored }) {
+    const viewportHeight = document.documentElement.clientHeight;
+    const hidden = [];
+    for (const el of document.querySelectorAll("*")) {
+      const cs = getComputedStyle(el);
+      const position = cs.position;
+      if (position !== "fixed" && position !== "sticky") continue;
+      if (cs.display === "none") continue;
+      if (el.closest('[class*="gyazo-ext-tycoon"]')) continue; // この拡張自身のUI
+      const rect = el.getBoundingClientRect();
+      if (position === "sticky" && !isStickyStuck(cs, rect, viewportHeight)) continue;
+      if (keepTopAnchored && rect.top < viewportHeight / 2) continue;
+      hidden.push({
+        el,
+        value: el.style.getPropertyValue("visibility"),
+        priority: el.style.getPropertyPriority("visibility"),
+      });
+      el.style.setProperty("visibility", "hidden", "important");
+    }
+    log("hid floating elements", { count: hidden.length, keepTopAnchored });
+    return () => {
+      for (const { el, value, priority } of hidden) {
+        if (value) el.style.setProperty("visibility", value, priority);
+        else el.style.removeProperty("visibility");
+      }
+    };
+  }
+
   // pageLeft/pageTop/width/height はページ絶対座標(CSS px)。
   // スクロールしながら captureVisibleTab を繰り返し、タイル一覧を
   // background(→offscreen)に送って結合・保存してもらう。
@@ -922,28 +968,40 @@
     let currentY = pageTop;
     const endY = pageTop + height;
     let lastScrollY = null;
+    let restoreFloating = null;
 
-    for (let i = 0; i < MAX_TILES && currentY < endY; i++) {
-      window.scrollTo(pageLeft, currentY);
-      await waitFor(SCROLL_SETTLE_MS);
-      const actualScrollY = window.scrollY;
+    try {
+      for (let i = 0; i < MAX_TILES && currentY < endY; i++) {
+        window.scrollTo(pageLeft, currentY);
+        await waitFor(SCROLL_SETTLE_MS);
+        const actualScrollY = window.scrollY;
 
-      if (actualScrollY === lastScrollY) break; // これ以上スクロールできない(下端に到達)
-      lastScrollY = actualScrollY;
+        if (actualScrollY === lastScrollY) break; // これ以上スクロールできない(下端に到達)
+        lastScrollY = actualScrollY;
 
-      const dataUrl = await captureNowWithRetry();
-      if (!dataUrl) {
-        log(`tile ${i + 1} capture failed after retries, skipping`, { actualScrollY });
-      } else {
-        tiles.push({ dataUrl, pageY: actualScrollY, pageX: window.scrollX });
+        // 追従要素はスクロール位置ごとに出たり消えたり(スクロール後に突然出現する
+        // フッターなど)するため、タイルごとに戻して探し直す。
+        restoreFloating?.();
+        restoreFloating = hideFloatingElements({
+          keepTopAnchored: i === 0 && actualScrollY === 0,
+        });
+        await nextPaint();
+
+        const dataUrl = await captureNowWithRetry();
+        if (!dataUrl) {
+          log(`tile ${i + 1} capture failed after retries, skipping`, { actualScrollY });
+        } else {
+          tiles.push({ dataUrl, pageY: actualScrollY, pageX: window.scrollX });
+        }
+        log(`captured tile ${i + 1}`, { actualScrollY, dataUrlLength: dataUrl?.length });
+
+        if (actualScrollY + viewportHeight >= endY) break;
+        currentY = actualScrollY + viewportHeight;
       }
-      log(`captured tile ${i + 1}`, { actualScrollY, dataUrlLength: dataUrl?.length });
-
-      if (actualScrollY + viewportHeight >= endY) break;
-      currentY = actualScrollY + viewportHeight;
+    } finally {
+      restoreFloating?.();
+      window.scrollTo(originalScrollX, originalScrollY);
     }
-
-    window.scrollTo(originalScrollX, originalScrollY);
 
     if (tiles.length === 0) {
       notifyCancelled("no tiles captured", "保存に失敗しました(タイル撮影に失敗しました)");
