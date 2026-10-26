@@ -114,10 +114,67 @@ async function captureActiveTabPng(windowId) {
   return dataUrl;
 }
 
+// ダウンロード開始時にChromeが出す「ダウンロードバブル/シェルフ」は、キーボードフォーカスを
+// 奪うため、ショートカットでの連続撮影が止まってしまう。そこで、拡張機能自身が起こした
+// ダウンロードの間だけ chrome.downloads.setUiOptions で標準のダウンロードUIを隠す
+// ("downloads.ui" 権限が必要)。ユーザー自身の他のダウンロードまで隠しっぱなしに
+// ならないよう、完了(または失敗/タイムアウト)したら必ず戻す。
+const DOWNLOAD_UI_RESTORE_TIMEOUT_MS = 15000;
+let downloadUiSuppressCount = 0;
+
+async function setDownloadUiEnabled(enabled) {
+  if (!chrome.downloads.setUiOptions) return;
+  try {
+    await chrome.downloads.setUiOptions({ enabled });
+  } catch (err) {
+    console.warn(LOG_PREFIX, "setUiOptions failed", err);
+  }
+}
+
+async function suppressDownloadUi() {
+  downloadUiSuppressCount++;
+  if (downloadUiSuppressCount === 1) await setDownloadUiEnabled(false);
+}
+
+async function restoreDownloadUi() {
+  downloadUiSuppressCount = Math.max(0, downloadUiSuppressCount - 1);
+  if (downloadUiSuppressCount === 0) await setDownloadUiEnabled(true);
+}
+
+// サービスワーカーがダウンロード中に破棄されると「隠したまま」になりうるため、
+// 起動のたびに必ず有効に戻しておく(隠すのはこの拡張機能だけなので安全)。
+setDownloadUiEnabled(true);
+
+function waitForDownloadEnd(downloadId) {
+  return new Promise((resolve) => {
+    const finish = () => {
+      chrome.downloads.onChanged.removeListener(onChanged);
+      clearTimeout(timer);
+      resolve();
+    };
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      const state = delta.state && delta.state.current;
+      if (state === "complete" || state === "interrupted") finish();
+    };
+    const timer = setTimeout(finish, DOWNLOAD_UI_RESTORE_TIMEOUT_MS);
+    chrome.downloads.onChanged.addListener(onChanged);
+  });
+}
+
 async function downloadUrl(url, filename) {
   log("downloading", filename);
-  const downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
+  await suppressDownloadUi();
+  let downloadId;
+  try {
+    downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
+  } catch (err) {
+    await restoreDownloadUi();
+    throw err;
+  }
   log("download started", filename, "downloadId=", downloadId);
+  // 完了待ちは呼び出し元をブロックしない(通知やその後の処理を遅らせないため)。
+  waitForDownloadEnd(downloadId).then(restoreDownloadUi);
   return downloadId;
 }
 
