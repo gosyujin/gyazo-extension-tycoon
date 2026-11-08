@@ -275,12 +275,15 @@
       // ツールバーごと非表示にする(finally で必ず戻す)。
       setOverlaysHidden(true);
       bar.style.visibility = "hidden";
+      // 前回のダウンロード完了トーストが残っていると、それも写り込みうるので隠す
+      setToastCaptureHidden(true);
       try {
         await nextPaint();
         await onSave();
       } catch (err) {
         console.error(LOG_PREFIX, "save failed", err);
       } finally {
+        setToastCaptureHidden(false);
         setOverlaysHidden(false);
         bar.style.visibility = "";
         saveBtn.disabled = false;
@@ -468,6 +471,7 @@
           } else {
             exitMaskMode();
             setOverlaysHidden(true);
+            dismissToast(); // 録画に写り込まないよう、残っているトーストは消す
             await nextPaint();
             const gifSettings = {
               fps: clampFps(fpsInput.value),
@@ -970,6 +974,9 @@
     let lastScrollY = null;
     let restoreFloating = null;
 
+    // トースト(拡張機能自身のUI)は hideFloatingElements の対象外なので、
+    // タイル撮影の間は自分で隠しておく(毎タイル同じ位置に写り込むため)。
+    setToastCaptureHidden(true);
     try {
       for (let i = 0; i < MAX_TILES && currentY < endY; i++) {
         window.scrollTo(pageLeft, currentY);
@@ -1001,6 +1008,7 @@
     } finally {
       restoreFloating?.();
       window.scrollTo(originalScrollX, originalScrollY);
+      setToastCaptureHidden(false);
     }
 
     if (tiles.length === 0) {
@@ -1023,8 +1031,308 @@
     }
   }
 
+  // --- ダウンロード結果のトースト ---
+  // 撮影・保存が終わったら、ページの隅に「ダウンロードしました [フォルダを表示] [画像をコピー]」
+  // を目立たない形で出す(background の reportToast から SHOW_TOAST で呼ばれる)。
+  // - ページ側のCSSに影響されず、overlay.css の注入有無にも依存しないよう、Shadow DOM の中に
+  //   スタイルごと自己完結させている。
+  // - 既定は右上。矩形選択・要素選択の選択枠やツールバーと重なる場合は、重ならない隅へ逃げる
+  //   (選択枠の外側に出して、連続撮影の邪魔にも画像への写り込みにもならないようにするため)。
+  const TOAST_AUTO_HIDE_MS = 8000;
+  const TOAST_ERROR_HIDE_MS = 10000;
+  const TOAST_AFTER_LEAVE_MS = 3000; // マウスが離れてから消えるまで
+  const TOAST_MARGIN = 12; // 画面端との余白
+  const TOAST_AVOID_PADDING = 8; // 選択枠・ツールバーとの最低限の間隔
+  const TOAST_CORNERS = ["top-right", "top-left", "bottom-right", "bottom-left"];
+  const TOAST_WATCH_INTERVAL_MS = 200; // 選択枠の変化に追従して位置を見直す間隔
+
+  const TOAST_STYLE = `
+    .toast {
+      position: absolute;
+      left: 0;
+      top: 0;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: max-content;
+      max-width: min(460px, calc(100vw - 24px));
+      padding: 8px 8px 8px 12px;
+      border-radius: 8px;
+      border-left: 4px solid #27ae60;
+      background: rgba(32, 33, 36, 0.96);
+      color: #fff;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", sans-serif;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+      opacity: 0;
+      pointer-events: auto;
+    }
+    .toast.show { opacity: 1; }
+    /* 最初の配置が済んでから有効にする(左上から滑ってくる動きを防ぐ) */
+    .toast.ready { transition: left 180ms ease, top 180ms ease, opacity 150ms ease; }
+    .toast.error { border-left-color: #eb5757; }
+    .text { min-width: 0; }
+    .title { font-weight: 600; white-space: nowrap; }
+    .detail {
+      margin-top: 1px;
+      color: #c4c7c5;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .actions { display: flex; gap: 6px; flex-shrink: 0; }
+    button {
+      padding: 4px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 4px;
+      background: transparent;
+      color: #fff;
+      font: inherit;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.15); }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .close { border: none; padding: 2px 6px; font-size: 14px; line-height: 1; }
+  `;
+
+  let toastHostEl = null;
+  let toastEl = null;
+  let toastCorner = null;
+  let toastHideTimer = null;
+  let toastWatchTimer = null;
+  // 撮影中だけトーストを隠すための入れ子カウンター(保存ボタン → タイル撮影のように重なる)
+  let toastCaptureHideDepth = 0;
+
+  function dismissToast() {
+    clearTimeout(toastHideTimer);
+    clearInterval(toastWatchTimer);
+    toastHideTimer = null;
+    toastWatchTimer = null;
+    toastHostEl?.remove();
+    toastHostEl = null;
+    toastEl = null;
+    toastCorner = null;
+  }
+
+  // 撮影(画面キャプチャ)の間だけトーストを非表示にする。写り込み防止用。
+  function setToastCaptureHidden(hidden) {
+    toastCaptureHideDepth = Math.max(0, toastCaptureHideDepth + (hidden ? 1 : -1));
+    if (toastHostEl) toastHostEl.style.visibility = toastCaptureHideDepth > 0 ? "hidden" : "";
+  }
+
+  function scheduleToastHide(ms) {
+    clearTimeout(toastHideTimer);
+    toastHideTimer = setTimeout(dismissToast, ms);
+  }
+
+  // トーストが避けるべき領域(いま画面にある選択枠・ツールバー)。
+  function getToastAvoidRects() {
+    const rects = [];
+    for (const el of [selectionBoxEl, highlightEl, toolbarEl]) {
+      if (!el || !el.isConnected) continue;
+      if (getComputedStyle(el).display === "none") continue; // ドラッグ開始前の選択枠など
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      rects.push({
+        left: r.left - TOAST_AVOID_PADDING,
+        top: r.top - TOAST_AVOID_PADDING,
+        right: r.right + TOAST_AVOID_PADDING,
+        bottom: r.bottom + TOAST_AVOID_PADDING,
+      });
+    }
+    return rects;
+  }
+
+  function overlapArea(a, b) {
+    const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return w > 0 && h > 0 ? w * h : 0;
+  }
+
+  // 置く隅を決める。いまの隅が空いていればそのまま(ふらつき防止)、重なっていれば
+  // 重ならない最初の隅へ。どこも重なる(選択範囲が画面いっぱい等)なら重なりが最小の隅。
+  function pickToastCorner(positions, avoid) {
+    const overlapOf = (corner) => {
+      const p = positions[corner];
+      const box = { left: p.left, top: p.top, right: p.right, bottom: p.bottom };
+      return avoid.reduce((sum, r) => sum + overlapArea(box, r), 0);
+    };
+    if (toastCorner && overlapOf(toastCorner) === 0) return toastCorner;
+    let best = TOAST_CORNERS[0];
+    let bestOverlap = Infinity;
+    for (const corner of TOAST_CORNERS) {
+      const o = overlapOf(corner);
+      if (o === 0) return corner;
+      if (o < bestOverlap) {
+        best = corner;
+        bestOverlap = o;
+      }
+    }
+    return best;
+  }
+
+  function updateToastPosition() {
+    if (!toastEl) return;
+    const w = toastEl.offsetWidth;
+    const h = toastEl.offsetHeight;
+    const vw = document.documentElement.clientWidth; // スクロールバー分を除く
+    const vh = document.documentElement.clientHeight;
+    const m = TOAST_MARGIN;
+    const left = { r: Math.max(0, vw - w - m), l: m };
+    const top = { t: m, b: Math.max(0, vh - h - m) };
+    const origin = {
+      "top-right": { left: left.r, top: top.t },
+      "top-left": { left: left.l, top: top.t },
+      "bottom-right": { left: left.r, top: top.b },
+      "bottom-left": { left: left.l, top: top.b },
+    };
+    const positions = {};
+    for (const [corner, p] of Object.entries(origin)) {
+      positions[corner] = { ...p, right: p.left + w, bottom: p.top + h };
+    }
+    toastCorner = pickToastCorner(positions, getToastAvoidRects());
+    // 隅が同じでもウィンドウサイズが変わっていれば座標は変わるので、毎回反映する
+    toastEl.style.left = `${positions[toastCorner].left}px`;
+    toastEl.style.top = `${positions[toastCorner].top}px`;
+  }
+
+  function dataUrlToBlob(dataUrl) {
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) throw new Error("画像データが不正です");
+    const binary = atob(dataUrl.slice(comma + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: "image/png" });
+  }
+
+  // image: { dataUrl } ならそのまま、{ blobUrl } なら background に取りに行ってもらう
+  // (offscreen document が作った Blob URL は、ページ側からは直接読めないため)。
+  async function loadImageBlob(image) {
+    let dataUrl = image.dataUrl;
+    if (!dataUrl) {
+      const res = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE_DATA_URL", url: image.blobUrl });
+      if (!res?.ok) throw new Error(res?.error ?? "画像の取得に失敗しました");
+      dataUrl = res.dataUrl;
+    }
+    return dataUrlToBlob(dataUrl);
+  }
+
+  // opts: { ok, title, detail?, downloadId?, image? }
+  function showToast({ ok, title, detail, downloadId, image }) {
+    dismissToast();
+
+    toastHostEl = document.createElement("div");
+    toastHostEl.className = "gyazo-ext-tycoon-toast-host";
+    // 大きさ0の固定要素にして、トースト本体を中で絶対配置する(ページのレイアウトに干渉しない)。
+    toastHostEl.style.cssText =
+      "all: initial; position: fixed; left: 0; top: 0; width: 0; height: 0; z-index: 2147483647;";
+    if (toastCaptureHideDepth > 0) toastHostEl.style.visibility = "hidden";
+    const shadow = toastHostEl.attachShadow({ mode: "closed" });
+
+    const style = document.createElement("style");
+    style.textContent = TOAST_STYLE;
+    shadow.appendChild(style);
+
+    toastEl = document.createElement("div");
+    toastEl.className = ok ? "toast" : "toast error";
+    toastEl.setAttribute("role", "status");
+    const el = toastEl;
+
+    const text = document.createElement("div");
+    text.className = "text";
+    const titleEl = document.createElement("div");
+    titleEl.className = "title";
+    titleEl.textContent = `${ok ? "✓" : "⚠"} ${title}`;
+    text.appendChild(titleEl);
+    if (detail) {
+      const detailEl = document.createElement("div");
+      detailEl.className = "detail";
+      detailEl.textContent = detail;
+      detailEl.title = detail;
+      text.appendChild(detailEl);
+    }
+    el.appendChild(text);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    if (ok && typeof downloadId === "number") {
+      const showBtn = document.createElement("button");
+      showBtn.type = "button";
+      showBtn.textContent = "フォルダを表示";
+      showBtn.addEventListener("click", () => {
+        chrome.runtime.sendMessage({ type: "SHOW_DOWNLOAD", downloadId }).catch((err) => {
+          console.error(LOG_PREFIX, "SHOW_DOWNLOAD failed", err);
+        });
+        scheduleToastHide(TOAST_AFTER_LEAVE_MS);
+      });
+      actions.appendChild(showBtn);
+    }
+    if (ok && image) {
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.textContent = "画像をコピー";
+      copyBtn.addEventListener("click", async () => {
+        copyBtn.disabled = true;
+        copyBtn.textContent = "コピー中…";
+        try {
+          // クリックのユーザー操作が有効なうちに clipboard.write を呼ぶ必要があるため、
+          // 画像の取得を待たずに Promise のまま ClipboardItem へ渡す。
+          // 画像そのもの(image/png)を書き込むので、Claude などにそのまま貼り付けられる。
+          await navigator.clipboard.write([
+            new ClipboardItem({ "image/png": loadImageBlob(image) }),
+          ]);
+          copyBtn.textContent = "コピーしました ✓";
+        } catch (err) {
+          console.error(LOG_PREFIX, "copy image failed", err);
+          copyBtn.textContent = "コピー失敗";
+          copyBtn.title = String(err?.message || err);
+        } finally {
+          copyBtn.disabled = false;
+          scheduleToastHide(TOAST_AFTER_LEAVE_MS + 2000);
+        }
+      });
+      actions.appendChild(copyBtn);
+    }
+    if (actions.childElementCount > 0) el.appendChild(actions);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "close";
+    closeBtn.textContent = "×";
+    closeBtn.setAttribute("aria-label", "閉じる");
+    closeBtn.addEventListener("click", dismissToast);
+    el.appendChild(closeBtn);
+
+    // 操作中は消えないようにする(ボタンを押す前に消えるのを防ぐ)
+    el.addEventListener("mouseenter", () => clearTimeout(toastHideTimer));
+    el.addEventListener("mouseleave", () => scheduleToastHide(TOAST_AFTER_LEAVE_MS));
+
+    shadow.appendChild(el);
+    document.documentElement.appendChild(toastHostEl);
+
+    updateToastPosition();
+    requestAnimationFrame(() => {
+      if (toastEl === el) el.classList.add("ready", "show");
+    });
+    // 選択枠の確定・ドラッグ・ツールバーの出現/移動に合わせて、必要なら隅を移し替える
+    toastWatchTimer = setInterval(updateToastPosition, TOAST_WATCH_INTERVAL_MS);
+    scheduleToastHide(ok ? TOAST_AUTO_HIDE_MS : TOAST_ERROR_HIDE_MS);
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     switch (message.type) {
+      case "SHOW_TOAST":
+        showToast(message);
+        sendResponse({ ok: true });
+        break;
+      case "PREPARE_CAPTURE":
+        // 画面を撮る直前に、残っているトーストを消して描画反映を待つ
+        // (非表示のタブでは rAF が止まるため、待ちすぎないようタイムアウトを付ける)
+        dismissToast();
+        Promise.race([nextPaint(), waitFor(300)]).then(() => sendResponse({ ok: true }));
+        return true;
       case "START_RECT_SELECT":
         startRectSelect();
         sendResponse({ ok: true });
