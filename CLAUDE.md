@@ -6,21 +6,18 @@
 
 - 作業を始める前に、必ず [README.md](README.md) を読み、プロジェクトの現状・これまでの意思決定の経緯を把握すること。
 - 機能を実装したら、その方針・経緯(なぜその設計にしたか)を README.md の「実装ログ / 意思決定の経緯」セクションに追記し、push すること。
-- チャットの中でこのファイルに残しておいた方がよいと感じた指示・注意点があれば、このファイルに追記し、push すること。
+- チャットの中で残しておいた方がよいと感じた指示・注意点があれば追記し、push すること。特定のファイルに結びつく注意は `.claude/rules/` の該当ファイル(`paths` に対象を書く)へ、結びつかないものはこのファイルへ書く。
 - **修正(バグ修正・機能追加問わず)のたびに `manifest.json` の `version` をバンプすること。** 目安はバグ修正・小さな変更は patch(例: 0.1.0 → 0.1.1)、まとまった機能追加は minor。バージョンを上げ忘れたまま複数の変更を1コミットに混ぜないこと。
 
-## その他のメモ
+## ファイル別の注意(.claude/rules/)
 
-<!-- チャットで得られた、今後も参照すべき指示・注意点をここに追記していく -->
+`background/` / `offscreen/` / `content/` の MV3 の罠は `.claude/rules/` にあり、Read / Edit ツールで該当ファイルを開くと自動で読み込まれる。Bash(`cat` / `sed` / `grep` など)で読み書きするときは自動では読み込まれないので、先に該当する `.claude/rules/*.md` を読む。
+
+中身の見出し: サービスワーカーの状態は信用しない / offscreen に `chrome.downloads` は無い / `sendMessage` で Blob を送らない / `captureVisibleTab` のレート制限 / content script の再注入は選択を壊す / 拡張機能の UI は撮影に写り込む / 他コンテキストの Blob URL は content script から fetch できない。
+
+## いつも効かせる注意
 
 - このプロジェクトはビルドツール(webpack/vite等)を使わないプレーンな JS/HTML/CSS の Chrome Extension(Manifest V3)。npm はライブラリ取得(`npm pack` で ESM バンドルを `vendor/` に配置する等)にのみ使い、依存パッケージとして `node_modules` に持ち込む使い方はしていない。この方針を変える場合はユーザーに確認すること。
 - 実装の背景・アーキテクチャ判断(なぜ offscreen document を使うか、GIF をどう作っているか等)は README.md にまとまっているので、拡張機能まわりを触る前に必ず目を通すこと。
 - **重要**: このセッションで使える組み込みブラウザ(Claude Browser / preview 系ツール)はサンドボックス化されており、`chrome://` 系ページや拡張機能の読み込み(`chrome://extensions` での Load unpacked)には使えない。Chrome Extension の動作確認は静的チェック(`node --check` での構文確認など)止まりになるため、実際の動作確認はユーザー自身に実機の Chrome で行ってもらう必要がある。「動作確認しました」と安易に言わないこと。
-- **MV3 サービスワーカーの状態は信用しない**: `background/service-worker.js` はアイドルで破棄され、次のイベントで(トップレベル変数がリセットされた状態で)再起動される。録画中フラグのような「複数メッセージにまたがって保持したい状態」をサービスワーカー側の `let` 変数に置くと、長時間かかる操作の途中で再起動されて状態が失われるバグになる(実際に発生した。README 2026-09-27 参照)。真実の情報源は状態を実際に持っているコンテキスト(このプロジェクトでは録画の実体を持つ offscreen document)に置き、サービスワーカーはそこに毎回問い合わせる設計にすること。
-- **エラーを握りつぶさない**: content script → background → offscreen のように一方向的にメッセージを投げるだけの箇所(`sendResponse` を誰も見ていない経路)では、失敗してもユーザーからは何も起きていないように見える。この種の拡張機能でユーザーが「ボタンを押しても何も起きない」と報告してきたら、まずログ経路(3つの DevTools コンソール)とエラー通知が足りているかを疑うこと。今回 `chrome.notifications` で成功/失敗を可視化する対応をした。
-- **`chrome.offscreen` の document には `chrome.downloads` が無い**(呼ぶと `chrome.downloads` が `undefined` になる)。offscreen document は Canvas/Blob/MediaStream など DOM 依存の処理だけに使い、ファイルの実際のダウンロード(`chrome.downloads.download`)は background 側で、offscreen が作った Blob を `URL.createObjectURL()` した Blob URL 経由で行うこと。Blob URL は offscreen document が生きている間は同一拡張機能の他コンテキストからも参照できる。
-- **`chrome.tabs.captureVisibleTab` は実質 2回/秒程度のレート制限がある**。超えると例外にならず戻り値が `undefined` になるだけなので、呼び出し側で明示的にチェックしないと気づかずに壊れたデータが下流に流れる(実際に踏んだ: フルページ撮影で一部タイルが `undefined` になり、それを `fetch()` しようとして `Failed to fetch` に化けた)。連続呼び出しが必要な場面(フルページ撮影等)では必ず呼び出し間隔にレートリミッター(実測で550ms以上を推奨)を入れ、失敗時はリトライすること。
-- **`chrome.runtime.sendMessage` は `Blob` などの非JSON値を安全に送れない**。offscreen → background に処理結果を返すときは、常に Blob URL などの文字列に変換してから送ること。
-- **content script の再注入は選択状態を壊す**: `content/content-script.js` の二重注入ガードは `__gyazoExtTycoonReinit` → `cleanupOverlay()` を呼び、矩形/要素選択の選択枠・ツールバー・マスクを全部消す。すでに選択を保持しているタブに対して「念のため注入」してはいけない。content script にメッセージを送るときは、まず `chrome.tabs.sendMessage` を試し、受信側がいない場合だけ注入して再送すること(`sendToContentScript()` 参照)。
-- **画面に実在する拡張機能のUIは撮影に写り込む**: 選択枠・ツールバー・トーストなど、ページ上に置いた要素は `captureVisibleTab` にそのまま写る。新しくUI要素を足したら、画像保存・タイル撮影・録画のそれぞれで隠す/消す処理が要るかを必ず確認すること(`hideFloatingElements()` は拡張機能自身のUIを除外しているので、タイル撮影では自分で隠す必要がある)。
-- **background(サービスワーカー)や offscreen の Blob URL は content script から直接 `fetch` できない**: ページとは別オリジンのため。content script が画像データを必要とするときは、background に取得(必要なら base64 化)してもらう。
+- **エラーを握りつぶさない**: content script → background → offscreen のように一方向的にメッセージを投げるだけの箇所(`sendResponse` を誰も見ていない経路)では、失敗してもユーザーからは何も起きていないように見える。ユーザーが「ボタンを押しても何も起きない」と報告してきたら、まずログ経路(3つの DevTools コンソール)とエラー通知(`chrome.notifications`)が足りているかを疑うこと。
